@@ -1,1 +1,23 @@
-# Client (transport) layer — portal HTTP session management.
+"""Client (transport) layer — portal HTTP session management."""
+
+from __future__ import annotations
+
+from urja.client.exceptions import (
+    AuthenticationError,
+    PortalError,
+    PortalRequestError,
+    PortalTimeoutError,
+    PortalUnavailableError,
+    ReadOnlyGuardError,
+)
+from urja.client.portal import PortalClient
+
+__all__ = [
+    "AuthenticationError",
+    "PortalClient",
+    "PortalError",
+    "PortalRequestError",
+    "PortalTimeoutError",
+    "PortalUnavailableError",
+    "ReadOnlyGuardError",
+]

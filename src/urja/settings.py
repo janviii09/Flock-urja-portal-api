@@ -10,6 +10,11 @@ class Settings(BaseSettings):
     urja_base_url: str = "https://urja-ops.flockenergy.tech"
     urja_email: str = ""
     urja_password: str = ""
+    portal_timeout: float = 15.0
+    portal_concurrency: int = 5
+    portal_max_retries: int = 3
+    portal_record_captures: bool = False
+    portal_captures_dir: str = "captures"
 
     # Service
     log_level: str = "INFO"

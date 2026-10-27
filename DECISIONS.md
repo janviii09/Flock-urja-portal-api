@@ -16,3 +16,7 @@ One line per decision, dated. Categories: `DECISION`, `ASSUMPTION`, `TRADE-OFF`,
 | 2026-10-27 | TRADE-OFF   | Using SvelteKit `__data.json` endpoints for data extraction instead of HTML parsing — structured but tightly coupled to SvelteKit internals. Will implement HTML parsing as fallback. |
 | 2026-10-27 | DECISION    | Hierarchy is 7 levels (Zone→Circle→Division→Subdivision→Substation→Feeder→DT). Breadcrumb on meter detail page is the only source for the full path. |
 | 2026-10-27 | DECISION    | Monorepo single-service layout (`src/urja/`) — no microservices, right-sized for the problem. |
+| 2026-10-28 | DECISION    | Portal client enforces read-only guard (non-GET methods rejected at transport boundary). |
+| 2026-10-28 | DECISION    | Session expiry detects both HTTP 401/403 and SvelteKit redirects to login page with HTML password form. |
+| 2026-10-28 | DECISION    | Re-authentication on session expiry retries exactly once to prevent infinite auth loops. |
+| 2026-10-28 | DECISION    | Concurrency limited at HTTP client level via `asyncio.Semaphore` to protect legacy portal. |

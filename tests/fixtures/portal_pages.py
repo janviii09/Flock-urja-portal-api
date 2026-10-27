@@ -5,6 +5,36 @@ These are hand-crafted from observed portal pages, not copied verbatim,
 so they contain no actual user data, but faithfully mirror the structure.
 """
 
+# ── Login page ─────────────────────────────────────────────────────────
+LOGIN_PAGE_HTML = """\
+<!DOCTYPE html>
+<html>
+<head><title>Urja Meter Ops</title></head>
+<body>
+  <form method="POST" action="/login">
+    <label>Email <input type="email" name="email" value="" /></label>
+    <label>Password <input type="password" name="password" value="" /></label>
+    <button type="submit">Sign in</button>
+  </form>
+</body>
+</html>
+"""
+
+LOGIN_FAILED_HTML = """\
+<!DOCTYPE html>
+<html>
+<head><title>Urja Meter Ops</title></head>
+<body>
+  <div class="error">Invalid email or password</div>
+  <form method="POST" action="/login">
+    <label>Email <input type="email" name="email" value="" /></label>
+    <label>Password <input type="password" name="password" value="" /></label>
+    <button type="submit">Sign in</button>
+  </form>
+</body>
+</html>
+"""
+
 # ── Meter list page (partial, page 1) ────────────────────────────────
 # Observed: 20 rows per page, 21 pages, 403 total meters.
 # Table columns: METER, SERIAL, MAKE, PHASE, STATUS, DT
