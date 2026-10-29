@@ -1,106 +1,107 @@
 # Urja Meter Ops API
 
-A robust, production-grade REST API wrapping the legacy **Urja Meter Ops** utility web portal (`https://urja-ops.flockenergy.tech`).
-
-The legacy portal provides no public API and is strictly read-only. This service authenticates, scrapes, normalizes, caches, and exposes smart meter metadata, 30-minute interval consumption time series, distribution transformers, network hierarchy trees, and geospatial queries through a clean, self-documenting JSON API with cache freshness provenance and RFC 7807 error handling.
+A REST API wrapping the legacy **Urja Meter Ops** utility portal. The portal works fine for humans clicking around — it has no API, so this service handles auth, data extraction, caching, and exposes everything through clean JSON endpoints.
 
 ---
 
 ## Table of Contents
 
-1. [Architecture & Project Structure](#architecture--project-structure)
-2. [Prerequisites & Installation](#prerequisites--installation)
-3. [Configuration (.env)](#configuration-env)
-4. [Running the Application](#running-the-application)
-5. [Running Tests & Quality Checks](#running-tests--quality-checks)
-6. [API Endpoints & Sample Requests](#api-endpoints--sample-requests)
+1. [What's Built](#whats-built)
+2. [Project Structure](#project-structure)
+3. [Installation & Setup](#installation--setup)
+4. [Configuration (.env)](#configuration-env)
+5. [Running the App](#running-the-app)
+6. [API Endpoints](#api-endpoints)
 7. [Design Decisions & Trade-offs](#design-decisions--trade-offs)
 8. [Assumptions](#assumptions)
-9. [What Was Skipped and Why](#what-was-skipped-and-why)
-10. [What I'd Improve with More Time](#what-id-improve-with-more-time)
-11. [Data Scale Limitations](#data-scale-limitations)
+9. [What Was Skipped](#what-was-skipped)
+10. [What I'd Improve](#what-id-improve)
+11. [Scale Limitations](#scale-limitations)
 12. [Key Documents](#key-documents)
 
 ---
 
-## Architecture & Project Structure
+## What's Built
 
-The project follows a layered domain-driven design where portal-specific quirks are strictly isolated from the rest of the application:
+The legacy portal is built for manual browser use without a public API. This service:
+
+- Authenticates with the portal (handling SvelteKit's CSRF requirements and session expiry)
+- Pulls data via the portal's internal JSON endpoints, including a bulk export that needs ephemeral HMAC-SHA256 signing
+- Stores everything locally in SQLite with WAL mode and per-record provenance
+- Serves it through a versioned FastAPI with cursor pagination, geospatial search, hierarchy tree traversal, and RFC 7807 error responses
+- Keeps data fresh with tiered TTLs and single-flight request deduplication
+
+---
+
+## Project Structure
 
 ```
 Flock-assign/
-├── PROTOCOL.md                       # Reverse-engineered facts about the legacy portal
-├── DECISIONS.md                      # Dated register of architectural choices, trade-offs, and mistakes
-├── REFLECTION.md                     # Personal reflection notes drafted from project decisions
-├── openapi.json                      # Exported OpenAPI 3.1.0 specification
-├── Makefile                          # Standard commands (install, run, test, lint, openapi)
-├── pyproject.toml                    # Poetry/setuptools package configuration and dependencies
+├── PROTOCOL.md                    # How the portal actually works (reverse-engineered)
+├── REFLECTION.md                  # Reflection answers
+├── openapi.json                   # OpenAPI 3.1.0 spec
+├── Makefile
+├── pyproject.toml
 ├── scripts/
-│   └── export_openapi.py             # Script to regenerate openapi.json from the FastAPI app
-├── src/urja/
-│   ├── adapters/                     # Verified portal JSON parsers (only layer aware of portal wire shape)
-│   │   ├── export.py                 # Verified /portal/export bulk dump parser (path-based hierarchy, quality flags)
-│   │   ├── search.py                 # Verified /portal/meters/search paginated search parser
-│   │   ├── energy.py                 # Verified /portal/meters/{id}/energy parser (UTC conversion, raw_ts preservation)
-│   │   └── dts.py                    # Verified /portal/dts?page=N distribution transformer parser
-│   ├── api/                          # FastAPI presentation layer
-│   │   ├── app.py                    # Application entry point and RFC 7807 error handler registration
-│   │   ├── deps.py                   # Dependency injection providers (Store, Client, Freshness, Sync)
-│   │   ├── errors.py                 # RFC 7807 Problem Details schemas and exception mappers
-│   │   └── v1/
-│   │       ├── router.py             # Version 1 route endpoints
-│   │       └── schemas.py            # Pydantic response envelopes and pagination schemas
-│   ├── client/                       # HTTP communication with the upstream portal
-│   │   ├── exceptions.py             # Portal error hierarchy (AuthenticationError, PortalShapeError, etc.)
-│   │   └── portal.py                 # Ephemeral HMAC-SHA256 signing, SvelteKit CSRF, concurrency limit, retry/backoff
-│   ├── domain/                       # Pure domain models (Pydantic v2)
-│   │   └── models.py                 # Meter, Reading, Transformer, HierarchyNode, QualityReport, etc.
-│   ├── freshness/                    # Cache freshness engine
-│   │   └── manager.py                # SingleFlight request deduplication, tiered TTLs, ResponseMeta
-│   ├── hierarchy/                    # Network topological analysis
-│   │   └── tree.py                   # Full-path tree synthesis, multi-parent detection, and defect auditing
-│   ├── store/                        # Local persistence layer
-│   │   ├── repository.py             # SQLite Store with WAL mode, change detection, and recursive CTEs
-│   │   └── schema.py                 # SQLite DDL with 6 justified query indexes
-│   ├── sync/                         # Data ingestion engine
-│   │   ├── __main__.py               # CLI entrypoint: python -m urja.sync
-│   │   └── engine.py                 # Verified bulk export, energy ingestion, atomic transactions
-│   ├── logging.py                    # Logging setup with SecretRedactingFilter
-│   └── settings.py                   # Pydantic Settings configuration from environment variables
-└── tests/                            # Comprehensive test suite (103 tests)
-    ├── fixtures/                     # Sanitized portal HTML and JSON captures
-    ├── test_adapters.py              # Parsing, schema enforcement, and portal quirk tests
-    ├── test_api.py                   # End-to-end API tests with MockTransport and RFC 7807 checks
-    ├── test_client.py                # Auth, session recovery, concurrency, timeout, and retry tests
-    ├── test_hardening.py             # Mid-sync session expiry, 502 containment, secret scrubbing
-    ├── test_hierarchy.py             # Graph defect repair, recursive CTEs, and spatial query tests
-    ├── test_phase1.py                # Contract and model verification tests
-    ├── test_store.py                 # Idempotent upserts, provenance, and indexing verification
-    └── test_sync.py                  # Multi-page sync, change detection, and partial failure isolation
+│   └── export_openapi.py
+└── src/urja/
+    ├── adapters/                  # Portal JSON parsers — the only layer that knows portal wire shapes
+    │   ├── export.py              # /portal/export bulk dump
+    │   ├── search.py              # /portal/meters/search pagination
+    │   ├── energy.py              # /portal/meters/{id}/energy, IST→UTC conversion
+    │   └── dts.py                 # /portal/dts transformers
+    ├── api/
+    │   ├── app.py                 # FastAPI entry point, error handler registration
+    │   ├── deps.py                # Dependency injection
+    │   ├── errors.py              # RFC 7807 Problem Details
+    │   └── v1/
+    │       ├── router.py          # Route handlers
+    │       └── schemas.py         # Response envelope schemas
+    ├── client/
+    │   ├── exceptions.py
+    │   └── portal.py              # HMAC signing, SvelteKit CSRF, retry/backoff, session recovery
+    ├── domain/models.py           # Pydantic v2 domain models
+    ├── freshness/manager.py       # TTL policies, single-flight deduplication
+    ├── hierarchy/tree.py          # Tree synthesis, cycle/multi-parent repair, quality audit
+    ├── store/
+    │   ├── repository.py          # SQLite queries, cursor pagination, haversine nearby
+    │   └── schema.py              # DDL + 6 indexes
+    ├── sync/
+    │   ├── __main__.py            # CLI: python -m urja.sync
+    │   └── engine.py              # Bulk export, energy sync, atomic transactions
+    ├── logging.py                 # Secret-redacting log filter
+    └── settings.py
+```
+
+Tests (103 total):
+
+```
+tests/
+├── test_adapters.py      # Parser correctness and portal quirk handling
+├── test_api.py           # End-to-end API with MockTransport, RFC 7807 checks
+├── test_client.py        # Auth, session recovery, concurrency, retry
+├── test_hardening.py     # Session expiry mid-sync, 502 containment, secret scrubbing
+├── test_hierarchy.py     # Graph repair, recursive CTEs, spatial queries
+├── test_phase1.py        # Domain model contracts
+├── test_store.py         # Idempotent upserts, provenance, indexes
+└── test_sync.py          # Multi-page sync, change detection, partial failure isolation
 ```
 
 ---
 
-## Prerequisites & Installation
+## Installation & Setup
 
-- **Python**: `3.9` or newer (tested on Python 3.9.6 macOS).
-- **Package Manager**: `pip` or virtualenv.
-
-### 1. Create and Activate Virtual Environment
+Requires Python 3.9+.
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-### 2. Install Dependencies
-
-```bash
 pip install --upgrade pip
 pip install -e ".[dev]"
 ```
 
-Alternatively, use the Makefile:
+Or just:
+
 ```bash
 make install
 ```
@@ -109,29 +110,21 @@ make install
 
 ## Configuration (.env)
 
-Create a `.env` file in the project root by copying the template:
-
 ```bash
 cp .env.example .env
 ```
 
-Configure your parameters:
-
 ```ini
-# Portal Credentials (Required for live portal sync)
 URJA_BASE_URL="https://urja-ops.flockenergy.tech"
-URJA_EMAIL="operator@flockenergy.tech"
-URJA_PASSWORD="your-secure-password"
+URJA_EMAIL="operator@urja.local"
+URJA_PASSWORD="urja-ops-2026"
 
-# Persistence
 DB_PATH="urja.db"
 
-# HTTP Client Tuning
 PORTAL_TIMEOUT=15.0
 PORTAL_CONCURRENCY=4
 PORTAL_MAX_RETRIES=3
 
-# Logging & Debugging
 LOG_LEVEL="INFO"
 PORTAL_RECORD_CAPTURES=false
 PORTAL_CAPTURES_DIR="captures"
@@ -139,66 +132,49 @@ PORTAL_CAPTURES_DIR="captures"
 
 ---
 
-### Synchronize Data from Portal
+## Running the App
 
-To populate or refresh local SQLite data from the live portal:
+**Sync data from the portal first:**
 
 ```bash
-# Full sync: bulk export (403 meters + 7-level hierarchy) and energy telemetry
+# Full sync: all 403 meters, hierarchy, and energy telemetry
 python -m urja.sync
 
-# Fast sync: bulk export only (skip energy telemetry)
+# Skip energy telemetry (faster)
 python -m urja.sync --no-energy
 
-# Targeted sync: bulk export + sample meters' energy telemetry
+# Sync energy for just the first N meters
 python -m urja.sync --energy-limit 20
 ```
 
-### Start the API Server
+**Start the API:**
 
 ```bash
 uvicorn urja.api.app:app --host 0.0.0.0 --port 8000 --reload
+# or: make run
 ```
 
-Or via Makefile:
-```bash
-make run
-```
+Once running:
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+- OpenAPI JSON: `http://localhost:8000/openapi.json`
 
-Interactive documentation will be available at:
-- **Swagger UI**: `http://localhost:8000/docs`
-- **ReDoc**: `http://localhost:8000/redoc`
-- **Raw OpenAPI JSON**: `http://localhost:8000/openapi.json`
-
----
-
-## Running Tests & Quality Checks
-
-The test suite includes **103 tests** across unit, integration, and mock-transport boundaries:
+**Tests and lint:**
 
 ```bash
-# Run all tests
 pytest
-
-# Run tests with detailed output
 pytest -v
-
-# Run lint and formatting checks
 ruff check .
-ruff format --check .
-
-# Automatically apply formatting
 ruff format .
-
-# Re-export OpenAPI spec to openapi.json
-python scripts/export_openapi.py
+python scripts/export_openapi.py   # regenerate openapi.json
 ```
 
 ---
 
-## API Endpoints & Sample Requests
+## API Endpoints
 
-Every `/v1/*` response is wrapped in an envelope containing standard cache freshness and origin provenance metadata:
+Every `/v1/*` response includes a `meta` envelope:
+
 ```json
 "meta": {
   "fetched_at": "2026-10-29T13:45:00Z",
@@ -208,266 +184,108 @@ Every `/v1/*` response is wrapped in an envelope containing standard cache fresh
 }
 ```
 
-### 1. Health & Upstream Connectivity
-
-Check API health, portal reachability, and recent sync audit metadata:
+### Health
 
 ```bash
-curl -s http://localhost:8000/v1/health | jq
+curl http://localhost:8000/v1/health
 ```
 
-*Sample Response:*
 ```json
 {
   "status": "ok",
   "portal_reachable": true,
   "last_sync": {
-    "run_id": "8f8b3c91-9e6b-4c2d-8b01-574d75f284b1",
     "started_at": "2026-10-29T13:00:00Z",
-    "completed_at": "2026-10-29T13:00:14Z",
     "status": "success",
-    "resource": "meters_list",
-    "items_new": 403,
-    "items_changed": 0,
-    "items_unchanged": 0,
-    "items_failed": 0
+    "items_new": 403
   },
-  "meta": {
-    "fetched_at": "2026-10-29T13:45:00Z",
-    "age_seconds": 0.0,
-    "stale": false,
-    "source": "store"
-  }
+  "meta": { ... }
 }
 ```
 
----
-
-### 2. List Smart Meters (Cursor Pagination & Filtering)
-
-Retrieve meters filtered by manufacturer, phase, or DT with stable $O(1)$ cursor pagination:
+### List Meters
 
 ```bash
-curl -s "http://localhost:8000/v1/meters?limit=2&phase=three&make=Secure" | jq
+curl "http://localhost:8000/v1/meters?limit=20&phase=single&make=HPL"
 ```
 
-*Sample Response:*
+Filters: `phase`, `make`, `status`, `dt_code`, `serial_no`. Cursor pagination via `cursor` param.
+
+### Meter Detail
+
+```bash
+curl http://localhost:8000/v1/meters/J100000
+```
+
+Returns nameplate, GPS coordinates, and the full 7-level hierarchy path (Zone › Circle › Division › Subdivision › Substation › Feeder › DT).
+
+### Consumption Time Series
+
+```bash
+curl "http://localhost:8000/v1/meters/J100000/consumption?from=2026-06-20T00:00:00Z&to=2026-06-23T23:30:00Z&limit=48"
+```
+
+30-minute interval readings. Preserves the portal's original `raw_timestamp` string alongside UTC-normalized `timestamp`.
+
 ```json
 {
-  "data": [
-    {
-      "meter_id": "J100002",
-      "serial_no": "SE34001",
-      "make": "Secure",
-      "phase_type": "three",
-      "installation_status": "Installed",
-      "installation_type": "Whole Current",
-      "dt_code": "DT-001",
-      "location": {
-        "latitude": 26.9389,
-        "longitude": 75.8309,
-        "quality_flags": []
-      },
-      "quality_flags": []
-    }
-  ],
-  "pagination": {
-    "next_cursor": "J100002",
-    "has_more": true,
-    "total": 142
-  },
-  "meta": {
-    "fetched_at": "2026-10-29T13:00:00Z",
-    "age_seconds": 2700.0,
-    "stale": false,
-    "source": "store"
-  }
+  "meter_id": "J100000",
+  "raw_timestamp": "23/06/2026 23:30",
+  "timestamp": "2026-06-23T18:00:00Z",
+  "kwh": 48438.74,
+  "kvah": 52313.84,
+  "voltage_r": 226.0
 }
 ```
 
----
-
-### 3. Get Meter Detail (Stale-While-Revalidate)
-
-Retrieve full nameplate, GPS coordinates, and 7-level hierarchy path (`Zone › Circle › Division › Subdivision › Substation › Feeder › DT`). If stale, triggers a background single-flight refresh while serving existing store data:
+### Network Hierarchy Tree
 
 ```bash
-curl -s http://localhost:8000/v1/meters/J100000 | jq
+curl http://localhost:8000/v1/hierarchy
 ```
 
-*Sample Response:*
-```json
-{
-  "data": {
-    "meter_id": "J100000",
-    "serial_no": "SE33962",
-    "make": "HPL",
-    "phase_type": "single",
-    "installation_status": "Decommissioned",
-    "installation_type": "Whole Current",
-    "dt_code": "DT-001",
-    "location": {
-      "latitude": 26.938961,
-      "longitude": 75.830957,
-      "quality_flags": []
-    },
-    "hierarchy_path": {
-      "zone": {"code": "Z-01", "name": "Jaipur Zone 1", "level": "zone"},
-      "circle": {"code": "C-01", "name": "Circle 1", "level": "circle"},
-      "division": {"code": "D-01", "name": "Division 1", "level": "division"},
-      "subdivision": {"code": "SD-01", "name": "Subdivision 1", "level": "subdivision"},
-      "substation": {"code": "SS-01", "name": "Substation 1", "level": "substation"},
-      "feeder": {"code": "F-001", "name": "Feeder 1", "level": "feeder"},
-      "dt": {"code": "DT-001", "name": "Malviya Nagar DT 1", "level": "dt"}
-    },
-    "quality_flags": []
-  },
-  "meta": {
-    "fetched_at": "2026-10-29T13:40:00Z",
-    "age_seconds": 300.0,
-    "stale": false,
-    "source": "store"
-  }
-}
-```
+Reconstructs the full 7-level tree. Handles messy portal data: normalizes duplicate codes, breaks cycles, resolves meters with conflicting parent references.
 
----
-
-### 4. Meter Consumption Time Series
-
-Query 30-minute interval readings (kWh, kVAh, voltage) with date range filtering:
+### Subtree / Children
 
 ```bash
-curl -s "http://localhost:8000/v1/meters/J100000/consumption?from=2026-06-20T00:00:00Z&to=2026-06-23T23:30:00Z&limit=2" | jq
+curl http://localhost:8000/v1/nodes/SS-01/subtree
+curl http://localhost:8000/v1/nodes/Z-01/children
 ```
 
-*Sample Response:*
-```json
-{
-  "data": [
-    {
-      "meter_id": "J100000",
-      "timestamp": "2026-06-23T18:00:00Z",
-      "raw_timestamp": "23/06/2026 23:30",
-      "kwh": 48438.74,
-      "kvah": 52313.84,
-      "voltage_r": 226.0,
-      "quality_flags": []
-    }
-  ],
-  "meta": {
-    "fetched_at": "2026-10-29T13:00:00Z",
-    "age_seconds": 2700.0,
-    "stale": false,
-    "source": "store"
-  }
-}
-```
+Subtree uses SQLite recursive CTEs with a depth guard at 20 levels.
 
----
-
-### 5. Reconstructed Network Hierarchy Tree
-
-Synthesizes the complete 7-level network tree with deterministic repair rules (breaking cycles, tie-breaking multiple parents, detaching dangling refs):
+### Nearby Meters
 
 ```bash
-curl -s http://localhost:8000/v1/hierarchy | jq
+curl "http://localhost:8000/v1/meters/nearby?lat=26.9389&lon=75.8309&radius_km=2.0&limit=10"
 ```
 
----
+Two-phase: SQL bounding-box prefilter then exact Haversine calculation. Excludes meters at (0, 0).
 
-### 6. Subtree Query (Recursive CTE)
-
-Queries all descendants of any hierarchy node using SQLite recursive CTEs with depth protection:
+### Data Quality Report
 
 ```bash
-curl -s http://localhost:8000/v1/nodes/SS-01/subtree | jq
+curl http://localhost:8000/v1/quality
 ```
 
----
+Audits hierarchy anomalies (orphans, cycles, multiple parents), meter issues (null island coordinates, unknown enums), and consumption anomalies (non-monotonic cumulative kWh).
 
-### 7. Geospatial Nearby Search (Bounding-Box + Haversine)
+### Errors
 
-Locate meters within a given radius (km) using a two-phase query (SQL bounding-box prefilter followed by exact great-circle Haversine calculation, excluding Null Island `(0,0)`):
+All 4xx/5xx responses return `application/problem+json` (RFC 7807):
 
 ```bash
-curl -s "http://localhost:8000/v1/meters/nearby?lat=26.9389&lon=75.8309&radius_km=2.0&limit=5" | jq
+curl -i "http://localhost:8000/v1/meters/INVALID ID"
 ```
 
----
-
-### 8. Network Data Quality Report
-
-Generates an audit report across hierarchy anomalies, meter quirks, and reading monotonicity:
-
-```bash
-curl -s http://localhost:8000/v1/quality | jq
-```
-
-*Sample Response:*
-```json
-{
-  "data": {
-    "total_meters_audited": 403,
-    "total_nodes_audited": 58,
-    "hierarchy_defects": {
-      "multiple_parents": {},
-      "dangling_parents": {},
-      "orphans": [],
-      "cycles": [],
-      "id_mismatches": {}
-    },
-    "meter_defects": {
-      "null_island": ["J100042"],
-      "unknown_phase": [],
-      "unknown_status": [],
-      "missing_nameplate": [],
-      "incomplete_hierarchy": []
-    },
-    "consumption_defects": {
-      "non_monotonic_kwh": ["J100015@2026-06-22T14:30:00Z"],
-      "timestamp_conversion_error": []
-    },
-    "quality_score": 98.7
-  },
-  "meta": {
-    "fetched_at": "2026-10-29T13:45:00Z",
-    "age_seconds": 0.0,
-    "stale": false,
-    "source": "store"
-  }
-}
-```
-
----
-
-### 9. RFC 7807 Error Responses
-
-All 4xx and 5xx errors return `application/problem+json`:
-
-```bash
-curl -i -s "http://localhost:8000/v1/meters/INVALID%20ID"
-```
-
-*Response Header & Body:*
-```http
-HTTP/1.1 422 Unprocessable Entity
-Content-Type: application/problem+json
-```
 ```json
 {
   "type": "https://urja-ops.flockenergy.tech/errors/validation-error",
   "title": "Unprocessable Entity",
   "status": 422,
   "detail": "The request parameters failed validation schema checks.",
-  "instance": "/v1/meters/INVALID%20ID",
-  "invalid_params": [
-    {
-      "name": "path -> meter_id",
-      "reason": "String should match pattern '^[A-Za-z0-9_\\-\\.]+$'",
-      "type": "string_pattern_mismatch"
-    }
-  ]
+  "instance": "/v1/meters/INVALID%20ID"
 }
 ```
 
@@ -475,73 +293,66 @@ Content-Type: application/problem+json
 
 ## Design Decisions & Trade-offs
 
-A comprehensive, dated decision log is maintained in [DECISIONS.md](./DECISIONS.md). Key trade-offs include:
+**quality_flags instead of silent data cleaning** — when the portal has bad data (coordinates at (0, 0), non-monotonic readings, unknown status values), the record is kept but tagged. Nothing is silently dropped. Consumers can decide what to trust.
 
-1. **Explicit `quality_flags` over Silent Coercion**:
-   - *Decision*: When encountering portal anomalies (e.g. coordinates at `(0, 0)`, non-monotonic consumption readings, unknown status enums), records are ingested with descriptive tags in `quality_flags` rather than being discarded or silently mutated.
-   - *Trade-off*: Consumer applications must inspect `quality_flags` if strict data cleanliness is required, but zero operational telemetry is lost.
+**SQLite with WAL mode** — no external infrastructure required. WAL gives concurrent reads without blocking. The trade-off is single-writer concurrency, which is fine here but would need a proper database for horizontal scaling.
 
-2. **SQLite with WAL Mode & Provenance**:
-   - *Decision*: Stored in embedded SQLite with write-ahead logging (WAL), foreign keys, and provenance columns (`fetched_at`, `source_endpoint`, `payload_hash`).
-   - *Trade-off*: Zero external infrastructure overhead for single-node deployments. However, horizontal scaling is limited by SQLite's single-writer concurrency.
+**Single-flight deduplication** — if 20 concurrent requests all hit an expired cache entry at the same time, only one actually calls the portal. The other 19 wait on the same asyncio Future. Works great in a single process; would need Redis or similar for multi-replica deployments.
 
-3. **In-Process Single-Flight Request Deduplication**:
-   - *Decision*: Coalesces concurrent queries for stale resources via `asyncio.Future` locks so 20 simultaneous API requests trigger exactly 1 upstream request to the legacy portal.
-   - *Trade-off*: Works across coroutines in a single Python process; multi-container orchestration would require a centralized coordinator (e.g., Redis).
+**Deterministic hierarchy repair** — the portal's hierarchy data has inconsistencies (same code appearing under multiple parents, some codes missing entirely). Rather than dropping bad nodes, the tree builder applies deterministic rules: normalize codes, pick the lexically first parent when there are duplicates, break cycles by detaching the offending edge. Everything ends up in the tree; the quality endpoint shows what got repaired.
 
-4. **Deterministic Graph Repair**:
-   - *Decision*: The graph builder resolves multiple parent definitions by selecting the lexically first parent (`sorted(parents)[0]`) and breaks cycles by converting back-edges to root nodes.
-   - *Trade-off*: Reconstructs an acyclic tree deterministically without deleting any node, allowing human operators to audit flagged anomalies in `/v1/quality`.
+**Full-path keying for hierarchy nodes** — node codes like `SD-01` can appear under different parents (different zones have their own `SD-01`). Keying by full path (`Z-01/C-01/D-01/SD-01`) instead of bare code handles this cleanly.
+
+**Cursor pagination** — offset-based pagination is unstable (inserts shift results mid-page). Cursor pagination (`meter_id > last_seen`) gives stable, O(1) page access.
 
 ---
 
 ## Assumptions
 
-- **Read-Only Portal**: The portal contains no state-modifying endpoints; all mutations are strictly rejected at the HTTP client transport layer.
-- **Timezone**: All portal timestamps lack timezone indicators and are assumed to represent Indian Standard Time (IST, UTC+05:30). They are stored and served as normalized UTC ISO-8601 timestamps, retaining `raw_timestamp` for provenance.
-- **Hierarchy Completeness**: The 7-level breadcrumb on the meter detail page is the sole authoritative representation of infrastructure hierarchy.
+- The portal is read-only. The client enforces this at the transport layer — non-GET requests are rejected before they're sent.
+- Portal timestamps are unzoned and assumed to be IST (UTC+05:30), since this is an Indian electricity utility. They're converted to UTC for storage and querying, with the original string preserved as `raw_timestamp`.
+- The 7-level breadcrumb on meter detail pages is the authoritative source of network hierarchy. There's no dedicated hierarchy endpoint.
+- Consumption readings are cumulative registers (kWh meter total), not interval deltas. The quality report flags any reading where the cumulative value decreases.
 
 ---
 
-## What Was Skipped and Why
+## What Was Skipped
 
-1. **Consumer Authentication**:
-   - *Why Skipped*: The assignment objective focused on wrapping, hardening, and structuring the legacy upstream portal data. Consumer authentication (e.g., OAuth2/JWT) was omitted to keep local execution frictionless for reviewers.
-2. **WebSockets / Server-Sent Events (SSE)**:
-   - *Why Skipped*: Real-time sync notifications were omitted in favor of pull-based audit inspection via `/v1/health` and `sync_runs` table records.
-3. **Distributed Rate Limiting**:
-   - *Why Skipped*: Rate limiting is enforced locally via `asyncio.Semaphore`. Distributed token-bucket coordination was avoided to eliminate external Redis dependencies.
+**Consumer authentication** — endpoints are open. The assignment was about wrapping the upstream portal, and adding JWT/API keys would make local setup more annoying for reviewers. In production this would be the first thing to add.
 
----
+**Real-time push** — there's no SSE or WebSocket endpoint for sync events. The `/v1/health` endpoint shows the last sync run, which is enough for a pull-based client.
 
-## What I'd Improve with More Time
-
-1. **Authentication & Authorization**: Add API key authentication or OAuth2 bearer tokens with role-based access control (Admin, Operator, Read-Only).
-2. **Distributed Cache & Locking**: Replace in-memory SingleFlight and semaphore tracking with Redis Redlock for clustered horizontal deployments.
-3. **Geospatial Materialization**: Migrate SQLite spatial queries to PostgreSQL with PostGIS (`ST_DWithin`) and materialize hierarchical paths using the PostgreSQL `ltree` extension for $O(1)$ subtree querying.
-4. **CI/CD Pipeline**: Add GitHub Actions workflow for linting, security scanning (Bandit, Safety), and multi-version Python testing.
-5. **Containerization**: Provide a multi-stage `Dockerfile` and `docker-compose.yml` for unified local setup.
+**Distributed rate limiting** — the semaphore protecting the portal is in-process. For a multi-replica deployment this would need Redis.
 
 ---
 
-## Data Scale Limitations
+## What I'd Improve
 
-- **Current Operational Scale ($<50{,}000$ Nodes / $<500{,}000$ Meters)**:
-  - In-memory DFS tree synthesis and SQLite recursive CTEs execute in $O(V + E)$ time and memory.
-  - Queries execute in under $40\,\text{ms}$ for district-level datasets.
-- **Bottlenecks at Scale ($>10\text{M}$ Records)**:
-  - **Spatial Filtering**: SQLite lacks native multi-dimensional spatial indexes. Bounding-box prefilters require B-tree scans over composite latitude/longitude columns, degrading at scale.
-  - **CTE Recursion Memory**: SQLite stores recursive CTE working tables in temporary disk files (`sqlite3_temp_directory`), introducing I/O latency on massive hierarchies.
-  - **Python In-Memory Trees**: Constructing deeply nested Pydantic graphs with millions of nodes creates garbage collection pauses and memory pressure.
-- **Production Path for Nation-Scale Grids**:
-  - Migrate storage to **PostgreSQL + PostGIS** for spatial queries (`GIST` index).
-  - Materialize hierarchy paths with **PostgreSQL `ltree`** or a graph database (**Neo4j**).
+- **Auth on the API** — API key or OAuth2 bearer tokens with RBAC (Admin, Operator, Read-Only).
+- **Redis for distributed coordination** — replace in-process SingleFlight and semaphores with Redlock.
+- **PostgreSQL + PostGIS** — for anything beyond district scale. The spatial bounding-box + Haversine approach works fine for 403 meters but would degrade at millions. PostGIS `ST_DWithin` with a GIST index handles it properly.
+- **PostgreSQL ltree for hierarchy** — materializing the hierarchy path in the database means subtree queries become O(1) prefix scans instead of recursive CTEs.
+- **Background sync daemon** — currently sync only runs on-demand (`python -m urja.sync`). A periodic background worker (Celery or APScheduler) would keep data continuously fresh.
+- **Dockerfile** — straightforward to add, just didn't prioritize it.
+
+---
+
+## Scale Limitations
+
+The current approach is sized for district-level data (hundreds of meters, tens of hierarchy nodes). It works fine for this dataset.
+
+Where it would start to struggle:
+
+- **Spatial queries** — SQLite has no multi-dimensional spatial index. The bounding-box prefilter uses a B-tree scan over lat/lon columns. Fine at 403 meters, slow at millions.
+- **Recursive CTE memory** — SQLite materializes working tables in temp files for recursive queries. Large hierarchies would hit I/O.
+- **In-memory tree synthesis** — building the entire hierarchy tree in Python memory is instant for hundreds of nodes, but creates GC pressure at nation scale.
+
+For a production utility grid: PostgreSQL + PostGIS for spatial, `ltree` extension for hierarchy, or push hierarchy into Neo4j.
 
 ---
 
 ## Key Documents
 
-- [PROTOCOL.md](./PROTOCOL.md) — Exhaustive reverse-engineered portal specification.
-- [DECISIONS.md](./DECISIONS.md) — Dated register of all design trade-offs, assumptions, and mistakes.
-- [REFLECTION.md](./REFLECTION.md) — Personal engineering notes and reflections.
-- [openapi.json](./openapi.json) — Full OpenAPI 3.1.0 JSON schema.
+- [PROTOCOL.md](./PROTOCOL.md) — How the portal actually works, from direct observation.
+- [REFLECTION.md](./REFLECTION.md) — Reflection questions answered.
+- [openapi.json](./openapi.json) — Full OpenAPI 3.1.0 schema.

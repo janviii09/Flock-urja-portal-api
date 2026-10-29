@@ -1,53 +1,61 @@
-# REFLECTION.md — Engineering Reflection
+# Reflection
 
-> Written for the **Flock Energy — Engineering Take-Home** assignment.
-> This document answers the five reflection questions specified in the evaluation brief.
+Notes on the approach, assumptions, trade-offs, and mistakes while building the Urja Meter Ops API.
 
 ---
 
 ## 1. What assumptions did you make?
 
-- **Read-Only Portal**: Assumed the legacy portal has no state-modifying actions needed and treated it as strictly read-only. We enforced this at the transport layer with a `ReadOnlyGuard` that rejects non-`GET` HTTP requests.
-- **Timezone**: The portal displays naive datetime strings (`DD/MM/YYYY HH:MM`) without timezone offsets. Because Urja is an Indian electricity distribution utility context, we assumed Indian Standard Time (IST, UTC+05:30). All timestamps are parsed, converted, and stored as normalized UTC ISO-8601 strings, while retaining the `raw_timestamp` string for immutable audit provenance.
-- **Cumulative Registers vs. Deltas**: Assumed consumption readings in the portal table represent cumulative meter registers (cumulative kWh and kVAh readings every 30 minutes) rather than interval usage deltas, requiring monotonicity and rollover checks.
-- **Static Snapshot of Historical Readings**: The latest readings on the portal ended on 30/06/2026. We verified via repeated fetches that historical readings do not mutate, justifying a tiered caching strategy: 1 hour for master metadata, 5 minutes for recent readings (<24h old), and 30 days (immutable) for historical readings.
-- **Hierarchy Completeness**: Assumed the 7-level breadcrumb on the meter detail page (`Zone › Circle › Division › Subdivision › Substation › Feeder › DT`) is the sole authoritative representation of the distribution network topology, as no independent hierarchy endpoint exists on the legacy portal.
+A few core assumptions shaped how the system was built:
+
+- **The portal is strictly read-only**: There are no write or update actions exposed by the portal. I treated it as an immutable source of truth and enforced this at the HTTP transport layer with a guard that blocks non-GET methods before they can touch the network.
+- **Timestamps are in Indian Standard Time (IST)**: The portal displays unzoned datetime strings like `23/06/2026 23:30`. Since Urja is an Indian power distribution context, I assumed IST (UTC+05:30). The service parses these into normalized UTC ISO-8601 strings for storage and querying, while keeping the original string intact in `raw_timestamp` for auditability.
+- **Consumption readings are cumulative registers**: The meter reading table shows cumulative energy totals (kWh and kVAh counter readings every 30 minutes) rather than interval usage deltas. The quality audit checks for monotonicity on these cumulative totals to catch counter resets or meter swaps.
+- **Historical readings are static**: The dataset on the portal ends on 30/06/2026. Repeated fetches confirmed that historical readings do not mutate over time, which allowed for aggressive caching: master metadata expires in 1 hour, recent readings (<24h) in 5 minutes, and historical readings are effectively immutable (30-day TTL).
+- **The 7-level breadcrumb is the only source of network hierarchy**: There is no dedicated hierarchy endpoint on the portal. The only place the full distribution tree (`Zone › Circle › Division › Subdivision › Substation › Feeder › DT`) appears is in the breadcrumbs on individual meter pages and the bulk export.
 
 ---
 
 ## 2. Which part was the most difficult, and how did you get unstuck?
 
-- **The Difficulty**: Handling the legacy portal's "soft" session expiration and re-login mechanics under concurrent traffic. The portal does not return standard HTTP 401 Unauthorized status codes when a session dies; instead, it issues an HTTP 303 redirect back to `/` and renders the HTML login form with an HTTP 200 status code. Furthermore, when multiple concurrent requests (such as during a multi-page crawl or burst API traffic) encountered an expired session simultaneously, naive retry logic caused thundering-herd re-logins that risked IP rate-limiting or account lockouts.
-- **How I Got Unstuck**:
-  1. *Shape-based expiry detection*: Rather than relying on HTTP status codes alone, the adapter inspects response bodies for `name="password"` and `name="email"` input fields on protected data endpoints to reliably detect unauthenticated redirects.
-  2. *Single-flight re-authentication*: Implemented an asynchronous lock (`_auth_lock`) in `PortalClient`. When $N$ concurrent coroutines encounter an expired session, only the first caller initiates the `POST /login` call. The remaining $N-1$ await the existing login in-flight, update their session cookies, and retry their original request once.
+The trickiest problem was handling the portal's "soft" session expiration under concurrent requests.
+
+When a session expires, the portal does not return a clean HTTP 401 or 403. Instead, it issues an HTTP 303 redirect back to `/` and serves the HTML login page with a 200 OK status. If you have several concurrent coroutines fetching data — say during a sync run or a burst of API calls — every single one would see the redirect at the same time. A naive retry loop resulted in a thundering herd where every worker tried to log in independently, risking IP rate-limiting or account lockout.
+
+Two things got this unstuck:
+
+1. **Detecting soft expiration by response shape**: Rather than relying on HTTP status codes alone, the client inspects response bodies on data endpoints for login form markers (`name="password"` and `name="email"`). If a data endpoint returns a login form, the client treats it as an expired session regardless of the 200 status.
+2. **Single-flight re-authentication**: I added an `asyncio.Lock` around login in the `PortalClient`. When N concurrent requests discover an expired session, only the first one actually sends a `POST /login`. The remaining N - 1 coroutines wait on the same in-flight login, pick up the refreshed session cookies once it finishes, and retry their original request once.
 
 ---
 
 ## 3. If you had another day, what would you improve?
 
-- **API Consumer Authentication & Authorization**: The service currently exposes open endpoints for local evaluation simplicity. In a production setting, I would add OAuth2 JWT bearer token or API key authentication with role-based access control (Operator, Analyst, Read-Only).
-- **Distributed Coordination & Caching**: The current `SingleFlight` request deduplication and concurrency semaphores run in-process in Python memory. To scale horizontally across multiple container replicas behind a load balancer, I would introduce a Redis backend for distributed rate-limiting and cache locking (e.g. Redlock).
-- **Continuous Autonomous Background Sync**: Currently, sync runs on-demand or during cache freshness evaluations. I would implement an autonomous background worker daemon (using Celery or APScheduler) that periodically polls the portal, detects changes via payload hashes, and keeps the local SQLite store continuously synchronized without needing incoming API traffic.
+If I had more time, I would focus on three areas:
+
+- **API consumer auth**: Right now the API endpoints are completely open so anyone reviewing or running locally can hit them immediately without having to set up API keys or tokens. In any real deployment, I'd add API key or JWT bearer authentication with basic role-based access (admin, operator, read-only).
+- **Distributed coordination**: The single-flight request coalescing and the concurrency semaphore both live in Python process memory. That works well for a single instance, but if you ran multiple containers behind a load balancer, each replica would independently hit the portal. I'd move the locking and deduplication to Redis (using something like Redlock) to coordinate across replicas.
+- **Continuous background sync daemon**: Sync is currently triggered either explicitly (`python -m urja.sync`) or on-demand when fresh data is needed. A scheduled background worker (Celery, APScheduler, or a lightweight async loop) that periodically polls the portal, tracks payload hashes, and writes changes would keep the local store warm without adding latency to user requests.
 
 ---
 
-## 4. What mistake did you make while solving this (there's always one)?
+## 4. What mistake did you make while solving this?
 
-- **The Legacy Portal Endpoint Assumption**:
-  Initially, I assumed the portal only exposed HTML tables for meters and hierarchy, and started parsing HTML with BeautifulSoup4. When doing a deep inspection of the portal's client-side SvelteKit bundle (`nodes/4.2Bgc2kUI.js`), I discovered verified JSON endpoints: `/portal/export` (bulk unpaginated dump of all 403 meters), `/portal/meters/search`, and `/portal/meters/{id}/energy`. Furthermore, `/portal/export` required an ephemeral HMAC-SHA256 signature calculated from a session secret fetched dynamically from `GET /portal/keys`.
-  *How it was resolved*: Replaced the HTML scraping pipeline with native JSON adapters (`export.py`, `energy.py`, `search.py`). In `PortalClient`, implemented ephemeral HMAC-SHA256 signing via `/portal/keys`, added `Origin` and `Referer` headers to `POST /login` to satisfy SvelteKit CSRF checks, and keyed hierarchy nodes by canonical full path to handle multi-parent codes (`SD-01`) cleanly.
-- **The Python 3.9 AnyIO Worker Thread Event Loop Trap**:
-  In FastAPI, I initially defined the dependency injection providers (`get_client()`, `get_freshness()`) as standard synchronous functions (`def get_client()`). FastAPI automatically offloads synchronous dependency functions to AnyIO worker threads via `anyio.to_thread.run_sync`. When `PortalClient` and `SingleFlight` instantiated `asyncio.Lock()` and `asyncio.Semaphore()`, Python 3.9 threw:
-  `RuntimeError: There is no current event loop in thread 'AnyIO worker thread'`.
-  *How it was resolved*: Converted all dependency providers to `async def` so FastAPI executes them directly on the running async event loop, and refactored `self.semaphore`, `self.auth_lock`, and `SingleFlight.lock` to lazily instantiate on their first asynchronous access.
-- **Duplicate Exception Class Masking**:
-  Early on, `MeterNotFoundError` was defined in both `src/urja/client/exceptions.py` (subclassing `PortalError`) and `src/urja/api/errors.py` (subclassing `Exception`). When an unknown meter triggered a 404 from the portal, FastAPI's exception handler did not recognize the client's exception as the API's class and fell through to the general `PortalError` handler, incorrectly returning a 502 Bad Gateway instead of a 404 Not Found. Consolidating into a single canonical class resolved the masking.
+A couple of notable ones came up during development:
+
+- **Assuming the portal only served HTML**:
+  Early on, I saw the portal's web interface and started writing BeautifulSoup scrapers for the HTML tables. While digging into the client-side SvelteKit bundle (`nodes/4.2Bgc2kUI.js`), I noticed the portal actually has internal JSON endpoints: `/portal/export` (a complete dump of all 403 meters), `/portal/meters/search`, and `/portal/meters/{id}/energy`. What looked like a purely HTML-scraping project actually had a cleaner JSON interface hidden behind an ephemeral HMAC-SHA256 signature requirement (`GET /portal/keys`). Tossing out the HTML parsers and rewriting around native JSON adapters took extra time, but it made ingestion significantly faster and more reliable.
+
+- **FastAPI sync dependency trap on Python 3.9**:
+  I initially wrote dependency providers like `get_client()` and `get_freshness()` as plain synchronous functions (`def get_client()`). FastAPI runs sync dependencies in worker threads using `anyio.to_thread.run_sync`. Because `PortalClient` and `SingleFlight` create `asyncio.Lock` and `asyncio.Semaphore` objects in their constructors, Python 3.9 failed immediately with `RuntimeError: There is no current event loop in thread 'AnyIO worker thread'`. The fix was converting the dependency functions to `async def` so FastAPI runs them on the main event loop, and lazily initializing locks on their first async call.
+
+- **Duplicate exception classes masking 404s**:
+  I had defined `MeterNotFoundError` in two places: `src/urja/client/exceptions.py` (inheriting from `PortalError`) and `src/urja/api/errors.py` (inheriting from `Exception`). When an unknown meter triggered a 404, FastAPI's error handler didn't match the client's class to the API's class. The exception fell through to the generic `PortalError` handler and returned a 502 Bad Gateway instead of a 404 Not Found. Consolidating into a single canonical exception class fixed it.
 
 ---
 
 ## 5. If you were reviewing your own submission, what would you criticise?
 
-- **Geospatial Scalability Boundary**: The two-phase spatial query (SQL bounding-box prefilter + Python Haversine calculation) is straightforward and executes in $<10\,\text{ms}$ for the 403 meters in the dataset. However, standard SQLite lacks native multi-dimensional spatial R-tree indexing. At $>10\text{M}$ meters, this approach would degrade into expensive B-tree index scans. For a production utility grid, I would criticize not migrating to PostgreSQL with PostGIS (`ST_DWithin` with a GiST spatial index).
-- **In-Memory Graph Synthesis**: The `HierarchyGraph` builds the entire 7-level tree in Python heap memory to perform cycle breaking and parent tie-breaking. While instantaneous for thousands of district nodes, this approach creates memory overhead at nation scale (>1M nodes). A mature architecture would materialize hierarchical paths in the database (e.g. PostgreSQL `ltree` extension) to evaluate subtrees in $O(1)$ without recursion.
-- **No Inbound Rate Limiting**: While the service carefully protects the *upstream* legacy portal with concurrency semaphores and exponential backoff, it does not enforce rate limits on incoming API consumers hitting `/v1/meters` or `/v1/hierarchy`. A runaway client could overwhelm the local API server.
+- **Geospatial querying doesn't scale to millions**: The two-phase bounding-box prefilter in SQL followed by a Python Haversine formula is simple, has zero external dependencies, and executes in under 10 ms for the 403 meters here. But standard SQLite lacks multi-dimensional spatial indexing. At scale (say, 500,000+ meters), the bounding box check becomes an expensive composite index scan. For production utility workloads, this should be PostgreSQL + PostGIS with an R-tree / GiST index (`ST_DWithin`).
+- **In-memory hierarchy tree reconstruction**: The `HierarchyGraph` loads all nodes into Python memory to detect multiple parents, break cycles, and assemble the nested JSON tree. That's instantaneous for 58 nodes across Jaipur, but it would become a memory hog and GC bottleneck for a state or national grid with hundreds of thousands of substations and transformers. A production system would store materialized paths in the database (like PostgreSQL's `ltree` extension) so subtree queries become fast prefix scans without recursive in-memory processing.
+- **No client-side rate limiting on the API**: The service takes great care to protect the *upstream* portal with concurrency semaphores and exponential backoff, but it doesn't protect *itself* from consumer abuse. An incoming burst of requests to `/v1/hierarchy` or `/v1/quality` could tie up the server. Adding token-bucket rate limiting (e.g. via `slowapi`) would be necessary before exposing this to untrusted clients.

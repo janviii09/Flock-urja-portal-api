@@ -1,6 +1,6 @@
 """SQLite database schema and index definitions for Urja Meter Ops.
 
-Every index is strictly justified below and documented in DECISIONS.md:
+Every index is strictly justified below:
 1. idx_meters_dt_code: Filter meters by distribution transformer (hierarchy queries).
 2. idx_meters_serial_no: Filter/search meters by serial number (matching portal search).
 3. idx_readings_timestamp: Time-range queries across meters (composite PK covers meter_id).
