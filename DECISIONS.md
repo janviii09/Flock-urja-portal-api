@@ -23,4 +23,9 @@ One line per decision, dated. Categories: `DECISION`, `ASSUMPTION`, `TRADE-OFF`,
 | 2026-10-29 | DECISION    | HTML adapters implemented via BeautifulSoup4 + lxml; raise `PortalShapeError(field=...)` on structural deviation. |
 | 2026-10-29 | DECISION    | Portal timestamps treated as IST (UTC+05:30) and converted to UTC datetime, keeping `raw_timestamp` for provenance. |
 | 2026-10-29 | DECISION    | Data quirks (null island `(0,0)`, non-monotonic kWh, unknown enums, missing nameplates) captured in `quality_flags` without dropping rows. |
+| 2026-10-29 | DECISION    | SQLite persistence with WAL mode, foreign keys, and per-entity provenance (`fetched_at`, `source_endpoint`, `payload_hash`). |
+| 2026-10-29 | DECISION    | Exact index justifications: `meters(dt_code)` for hierarchy, `meters(serial_no)` for search, `readings(timestamp)` for cross-meter ranges, `hierarchy_nodes(parent_code, level)` for tree traversal, `sync_runs(started_at DESC)` for freshness. |
+| 2026-10-29 | DECISION    | Entity-level change detection on upsert: only actual field updates count as `CHANGED`; identical data is marked `UNCHANGED`. |
+| 2026-10-29 | DECISION    | Fault-isolated sync transactions: individual page or meter detail failures roll back atomically without corrupting previously synced records. |
+
 

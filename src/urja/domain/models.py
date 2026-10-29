@@ -157,3 +157,38 @@ class Provenance(BaseModel):
     fetched_at: datetime
     source_endpoint: str  # e.g. "/meters/J100000"
     payload_hash: str  # SHA-256 hex of raw portal response
+
+
+# ── Sync & Store Tracking ─────────────────────────────────────────────
+
+
+class UpsertResult(str, Enum):
+    """Outcome of an idempotent upsert with change detection."""
+
+    NEW = "new"
+    CHANGED = "changed"
+    UNCHANGED = "unchanged"
+
+
+class SyncStatus(str, Enum):
+    """Status lifecycle of a sync run."""
+
+    RUNNING = "running"
+    SUCCESS = "success"
+    PARTIAL_FAILURE = "partial_failure"
+    FAILED = "failed"
+
+
+class SyncRun(BaseModel):
+    """Audit record for a synchronization operation."""
+
+    run_id: str
+    started_at: datetime
+    completed_at: datetime | None = None
+    status: SyncStatus = SyncStatus.RUNNING
+    resource: str  # e.g. "meters_list", "meter_detail", "transformers", "all"
+    items_new: int = 0
+    items_changed: int = 0
+    items_unchanged: int = 0
+    items_failed: int = 0
+    error_message: str | None = None
