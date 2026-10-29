@@ -13,7 +13,7 @@ Observed portal data (from direct exploration):
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
@@ -151,9 +151,19 @@ class Reading(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _default_raw_timestamp(cls, data: Any) -> Any:
-        if isinstance(data, dict) and not data.get("raw_timestamp") and data.get("timestamp"):
-            ts = data["timestamp"]
-            data["raw_timestamp"] = ts.isoformat() if isinstance(ts, datetime) else str(ts)
+        if isinstance(data, dict):
+            raw_ts = data.get("raw_timestamp")
+            ts = data.get("timestamp")
+            if not raw_ts and ts:
+                dt = (
+                    ts
+                    if isinstance(ts, datetime)
+                    else datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                )
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                ist_dt = dt.astimezone(timezone(timedelta(hours=5, minutes=30)))
+                data["raw_timestamp"] = ist_dt.strftime("%d/%m/%Y %H:%M")
         return data
 
 

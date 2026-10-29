@@ -14,7 +14,7 @@ import sqlite3
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -602,11 +602,20 @@ class Store:
 
     def _row_to_reading(self, row: sqlite3.Row) -> Reading:
         flags = json.loads(row["quality_flags"]) if row["quality_flags"] else []
-        raw_ts = row["raw_timestamp"] if "raw_timestamp" in row else row["timestamp"]
+        cols = row.keys()
+        raw_ts = (
+            row["raw_timestamp"]
+            if ("raw_timestamp" in cols and row["raw_timestamp"])
+            else row["timestamp"]
+        )
+        dt = _iso_to_dt(row["timestamp"])
+        if "T" in str(raw_ts) or (len(str(raw_ts)) >= 10 and str(raw_ts)[4] == "-"):
+            ist_dt = dt.astimezone(timezone(timedelta(hours=5, minutes=30)))
+            raw_ts = ist_dt.strftime("%d/%m/%Y %H:%M")
         return Reading(
             meter_id=row["meter_id"],
             raw_timestamp=raw_ts,
-            timestamp=_iso_to_dt(row["timestamp"]),
+            timestamp=dt,
             kwh=row["kwh"],
             kvah=row["kvah"],
             voltage_r=row["voltage_r"],

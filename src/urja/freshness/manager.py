@@ -9,6 +9,7 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
 from enum import Enum
@@ -96,6 +97,8 @@ class SingleFlight:
             return val
         except BaseException as exc:
             future.set_exception(exc)
+            with contextlib.suppress(Exception):
+                future.exception()
             raise
         finally:
             async with self.lock:

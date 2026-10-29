@@ -67,7 +67,7 @@ Flock-assign/
 │   │   └── engine.py                 # Verified bulk export, energy ingestion, atomic transactions
 │   ├── logging.py                    # Logging setup with SecretRedactingFilter
 │   └── settings.py                   # Pydantic Settings configuration from environment variables
-└── tests/                            # Comprehensive test suite (141 tests)
+└── tests/                            # Comprehensive test suite (103 tests)
     ├── fixtures/                     # Sanitized portal HTML and JSON captures
     ├── test_adapters.py              # Parsing, schema enforcement, and portal quirk tests
     ├── test_api.py                   # End-to-end API tests with MockTransport and RFC 7807 checks
@@ -76,8 +76,7 @@ Flock-assign/
     ├── test_hierarchy.py             # Graph defect repair, recursive CTEs, and spatial query tests
     ├── test_phase1.py                # Contract and model verification tests
     ├── test_store.py                 # Idempotent upserts, provenance, and indexing verification
-    ├── test_sync.py                  # Multi-page sync, change detection, and partial failure isolation
-    └── test_verified_portal.py       # Verified JSON bulk export, HMAC signing, energy telemetry tests
+    └── test_sync.py                  # Multi-page sync, change detection, and partial failure isolation
 ```
 
 ---
@@ -175,7 +174,7 @@ Interactive documentation will be available at:
 
 ## Running Tests & Quality Checks
 
-The test suite includes **141 tests** across unit, integration, and mock-transport boundaries:
+The test suite includes **103 tests** across unit, integration, and mock-transport boundaries:
 
 ```bash
 # Run all tests
