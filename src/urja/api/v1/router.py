@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from urja.api.deps import (
     get_client,
@@ -54,6 +54,7 @@ async def list_meters(
     cursor: Annotated[
         str | None,
         Query(
+            max_length=128,
             description="Opaque pagination cursor (meter_id to paginate after).",
             examples=["J100020"],
         ),
@@ -69,6 +70,7 @@ async def list_meters(
     dt_code: Annotated[
         str | None,
         Query(
+            max_length=64,
             description="Filter by Distribution Transformer code.",
             examples=["DT-001"],
         ),
@@ -76,6 +78,7 @@ async def list_meters(
     serial_no: Annotated[
         str | None,
         Query(
+            max_length=64,
             description="Filter by meter serial number.",
             examples=["SE33962"],
         ),
@@ -83,6 +86,7 @@ async def list_meters(
     make: Annotated[
         str | None,
         Query(
+            max_length=64,
             description="Filter by meter manufacturer (e.g. HPL, L&T, Secure).",
         ),
     ] = None,
@@ -228,7 +232,16 @@ async def get_meters_nearby(
     ),
 )
 async def get_meter_detail(
-    meter_id: str,
+    meter_id: Annotated[
+        str,
+        Path(
+            min_length=1,
+            max_length=64,
+            pattern=r"^[A-Za-z0-9_\-\.]+$",
+            description="Smart meter unique identifier",
+            examples=["J100000"],
+        ),
+    ],
     store: Annotated[Store, Depends(get_store)],
     client: Annotated[PortalClient, Depends(get_client)],
     freshness: Annotated[FreshnessManager, Depends(get_freshness)],
@@ -276,8 +289,11 @@ async def get_meter_detail(
             f"sync:meter:{mid}",
             lambda: sync_engine.sync_meter_detail(client, mid),
         )
+    except MeterNotFoundError:
+        raise
     except Exception as e:
         logger.error("Failed to fetch meter %s from portal: %s", mid, e)
+        raise
 
     stored = store.get_meter_with_provenance(mid)
     if stored is None:
@@ -306,7 +322,16 @@ async def get_meter_detail(
     ),
 )
 async def get_meter_consumption(
-    meter_id: str,
+    meter_id: Annotated[
+        str,
+        Path(
+            min_length=1,
+            max_length=64,
+            pattern=r"^[A-Za-z0-9_\-\.]+$",
+            description="Smart meter unique identifier",
+            examples=["J100000"],
+        ),
+    ],
     from_time: Annotated[
         datetime | None,
         Query(
@@ -334,6 +359,12 @@ async def get_meter_consumption(
     freshness: Annotated[FreshnessManager, Depends(get_freshness)] = None,
     sync_engine: Annotated[SyncEngine, Depends(get_sync_engine)] = None,
 ) -> ConsumptionResponse:
+    if from_time and to_time and from_time > to_time:
+        raise HTTPException(
+            status_code=400,
+            detail="Query parameter 'from' must be earlier than or equal to 'to'.",
+        )
+
     mid = meter_id.strip().upper()
     readings, fetched_at = store.get_readings_range(
         meter_id=mid,
@@ -354,9 +385,11 @@ async def get_meter_consumption(
                     lambda: sync_engine.sync_meter_detail(client, mid),
                 )
                 source = "portal"
+            except MeterNotFoundError:
+                raise
             except Exception as e:
                 logger.error("Could not sync meter %s: %s", mid, e)
-                raise MeterNotFoundError(mid) from e
+                raise
 
             readings, fetched_at = store.get_readings_range(
                 meter_id=mid,
@@ -463,7 +496,16 @@ async def get_hierarchy(
     description="Returns the immediate children of the specified hierarchy node code.",
 )
 async def get_node_children(
-    node_id: str,
+    node_id: Annotated[
+        str,
+        Path(
+            min_length=1,
+            max_length=64,
+            pattern=r"^[A-Za-z0-9_\-\.]+$",
+            description="Hierarchy node unique code",
+            examples=["ZONE-NORTH"],
+        ),
+    ],
     store: Annotated[Store, Depends(get_store)],
     freshness: Annotated[FreshnessManager, Depends(get_freshness)],
 ) -> HierarchyNodeListResponse:
@@ -490,7 +532,16 @@ async def get_node_children(
     ),
 )
 async def get_node_subtree(
-    node_id: str,
+    node_id: Annotated[
+        str,
+        Path(
+            min_length=1,
+            max_length=64,
+            pattern=r"^[A-Za-z0-9_\-\.]+$",
+            description="Hierarchy node unique code",
+            examples=["ZONE-NORTH"],
+        ),
+    ],
     store: Annotated[Store, Depends(get_store)],
     freshness: Annotated[FreshnessManager, Depends(get_freshness)],
 ) -> HierarchySubtreeResponse:

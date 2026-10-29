@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -17,12 +18,7 @@ from urja.api.errors import (
     validation_exception_handler,
 )
 from urja.api.v1.router import router as v1_router
-from urja.client.exceptions import (
-    AuthenticationError,
-    PortalShapeError,
-    PortalTimeoutError,
-    PortalUnavailableError,
-)
+from urja.client.exceptions import PortalError
 from urja.logging import setup_logging
 
 setup_logging()
@@ -49,10 +45,8 @@ app.add_exception_handler(MeterNotFoundError, meter_not_found_handler)
 app.add_exception_handler(NodeNotFoundError, node_not_found_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(StarletteHTTPException, http_exception_handler)
-app.add_exception_handler(PortalUnavailableError, portal_upstream_error_handler)
-app.add_exception_handler(PortalTimeoutError, portal_upstream_error_handler)
-app.add_exception_handler(PortalShapeError, portal_upstream_error_handler)
-app.add_exception_handler(AuthenticationError, portal_upstream_error_handler)
+app.add_exception_handler(PortalError, portal_upstream_error_handler)
+app.add_exception_handler(httpx.HTTPError, portal_upstream_error_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
 # ── Include Routers ───────────────────────────────────────────────────

@@ -61,7 +61,14 @@ class SingleFlight:
 
     def __init__(self) -> None:
         self._flights: dict[str, asyncio.Future[Any]] = {}
-        self._lock = asyncio.Lock()
+        self._lock: asyncio.Lock | None = None
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        """Lazily initialize lock in running event loop."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     async def do(
         self,
@@ -69,7 +76,7 @@ class SingleFlight:
         coro_fn: Callable[[], Coroutine[Any, Any, T]],
     ) -> T:
         """Execute coro_fn once for the given key among concurrent callers."""
-        async with self._lock:
+        async with self.lock:
             if key in self._flights:
                 future = self._flights[key]
                 is_leader = False
@@ -91,7 +98,7 @@ class SingleFlight:
             future.set_exception(exc)
             raise
         finally:
-            async with self._lock:
+            async with self.lock:
                 self._flights.pop(key, None)
 
 

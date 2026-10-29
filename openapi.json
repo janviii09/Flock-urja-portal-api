@@ -22,7 +22,8 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "maxLength": 128
                 },
                 {
                   "type": "null"
@@ -57,7 +58,8 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "maxLength": 64
                 },
                 {
                   "type": "null"
@@ -78,7 +80,8 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "maxLength": 64
                 },
                 {
                   "type": "null"
@@ -99,7 +102,8 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "maxLength": 64
                 },
                 {
                   "type": "null"
@@ -286,8 +290,16 @@
             "required": true,
             "schema": {
               "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9_\\-\\.]+$",
+              "description": "Smart meter unique identifier",
+              "examples": [
+                "J100000"
+              ],
               "title": "Meter Id"
-            }
+            },
+            "description": "Smart meter unique identifier"
           }
         ],
         "responses": {
@@ -329,8 +341,16 @@
             "required": true,
             "schema": {
               "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9_\\-\\.]+$",
+              "description": "Smart meter unique identifier",
+              "examples": [
+                "J100000"
+              ],
               "title": "Meter Id"
-            }
+            },
+            "description": "Smart meter unique identifier"
           },
           {
             "name": "from",
@@ -468,8 +488,16 @@
             "required": true,
             "schema": {
               "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9_\\-\\.]+$",
+              "description": "Hierarchy node unique code",
+              "examples": [
+                "ZONE-NORTH"
+              ],
               "title": "Node Id"
-            }
+            },
+            "description": "Hierarchy node unique code"
           }
         ],
         "responses": {
@@ -511,8 +539,16 @@
             "required": true,
             "schema": {
               "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9_\\-\\.]+$",
+              "description": "Hierarchy node unique code",
+              "examples": [
+                "ZONE-NORTH"
+              ],
               "title": "Node Id"
-            }
+            },
+            "description": "Hierarchy node unique code"
           }
         ],
         "responses": {

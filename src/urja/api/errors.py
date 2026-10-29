@@ -16,10 +16,7 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from urja.client.exceptions import (
-    AuthenticationError,
-    PortalShapeError,
-    PortalTimeoutError,
-    PortalUnavailableError,
+    MeterNotFoundError,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,14 +34,6 @@ class ProblemDetail(BaseModel):
     detail: str
     instance: str
     invalid_params: list[dict[str, Any]] | None = None
-
-
-class MeterNotFoundError(Exception):
-    """Raised when a meter ID does not exist on the portal or in the store."""
-
-    def __init__(self, meter_id: str) -> None:
-        self.meter_id = meter_id
-        super().__init__(f"Meter '{meter_id}' not found.")
 
 
 class NodeNotFoundError(Exception):
@@ -149,7 +138,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
 
 async def portal_upstream_error_handler(
     request: Request,
-    exc: PortalUnavailableError | PortalTimeoutError | PortalShapeError | AuthenticationError,
+    exc: Exception,
 ) -> JSONResponse:
     logger.error("Upstream portal error handling request %s: %s", request.url.path, exc)
     return create_problem_response(

@@ -26,7 +26,7 @@ def get_store() -> Store:
     return _store
 
 
-def get_client() -> PortalClient:
+async def get_client() -> PortalClient:
     global _client
     if _client is None:
         _client = PortalClient(
@@ -37,19 +37,19 @@ def get_client() -> PortalClient:
             concurrency_limit=settings.portal_concurrency,
             max_retries=settings.portal_max_retries,
             record_captures=settings.portal_record_captures,
-            captures_dir=settings.portal_captures_dir,
+            capture_dir=settings.portal_captures_dir,
         )
     return _client
 
 
-def get_freshness() -> FreshnessManager:
+async def get_freshness() -> FreshnessManager:
     global _freshness
     if _freshness is None:
         _freshness = FreshnessManager()
     return _freshness
 
 
-def get_sync_engine(
+async def get_sync_engine(
     store: Annotated[Store, Depends(get_store)],
 ) -> SyncEngine:
     global _sync_engine

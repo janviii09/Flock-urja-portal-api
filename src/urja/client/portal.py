@@ -51,6 +51,7 @@ class PortalClient:
         jitter: float = 0.25,
         record_captures: bool | None = None,
         capture_dir: str | Path | None = None,
+        captures_dir: str | Path | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.base_url = (base_url or settings.urja_base_url).rstrip("/")
@@ -67,11 +68,12 @@ class PortalClient:
         self.record_captures = (
             record_captures if record_captures is not None else settings.portal_record_captures
         )
-        self.capture_dir = Path(capture_dir or settings.portal_captures_dir)
+        effective_capture_dir = capture_dir or captures_dir or settings.portal_captures_dir
+        self.capture_dir = Path(effective_capture_dir)
 
-        self._semaphore = asyncio.Semaphore(self.concurrency_limit)
+        self._semaphore: asyncio.Semaphore | None = None
         self._is_logged_in = False
-        self._auth_lock = asyncio.Lock()
+        self._auth_lock: asyncio.Lock | None = None
 
         # Internal HTTP client
         self._client = httpx.AsyncClient(
@@ -84,6 +86,20 @@ class PortalClient:
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8",
             },
         )
+
+    @property
+    def semaphore(self) -> asyncio.Semaphore:
+        """Lazily initialize concurrency semaphore in active event loop."""
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self.concurrency_limit)
+        return self._semaphore
+
+    @property
+    def auth_lock(self) -> asyncio.Lock:
+        """Lazily initialize authentication lock in active event loop."""
+        if self._auth_lock is None:
+            self._auth_lock = asyncio.Lock()
+        return self._auth_lock
 
     async def __aenter__(self) -> PortalClient:
         return self
@@ -99,7 +115,7 @@ class PortalClient:
 
     async def login(self) -> None:
         """Perform SvelteKit form login on the portal."""
-        async with self._auth_lock:
+        async with self.auth_lock:
             if not self.email or not self.password:
                 raise AuthenticationError(
                     "Missing portal credentials: URJA_EMAIL and URJA_PASSWORD must be configured."
@@ -204,7 +220,7 @@ class PortalClient:
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                async with self._semaphore:
+                async with self.semaphore:
                     response = await self._client.request(
                         method,
                         url,
