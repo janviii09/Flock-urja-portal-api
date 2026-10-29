@@ -25,3 +25,16 @@ class PortalTimeoutError(PortalRequestError):
 
 class PortalUnavailableError(PortalRequestError):
     """Raised when portal is unreachable or repeatedly returns 5xx."""
+
+
+class PortalShapeError(PortalError):
+    """Raised when portal HTML structure doesn't match known format.
+
+    This means the portal may have been updated/redesigned.
+    The ``field`` attribute names the specific element or column that was missing
+    or unparseable so callers can triage quickly.
+    """
+
+    def __init__(self, message: str, field: str | None = None) -> None:
+        super().__init__(message)
+        self.field = field

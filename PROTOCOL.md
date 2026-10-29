@@ -126,22 +126,29 @@ Header shows `Latest: DD/MM/YYYY HH:MM`
 - **ASSUMPTION**: Triggers a CSV download containing all meters with details.
 - Exact endpoint and format **need confirmation** (requires auth, download in browser).
 
-## 8. SvelteKit Internal Endpoints
+## 8. Observed Portal API & Data Endpoints
 
-The portal is a SvelteKit app and exposes `__data.json` endpoints:
-- `/meters/__data.json` — returns dehydrated SvelteKit data
-- `/meters/{meterId}/__data.json` — returns meter detail data
-- `/transformers/__data.json` — returns transformer list data
+In addition to HTML SSR, the following direct JSON and SvelteKit endpoints exist:
 
-**Note**: These return SvelteKit's internal indexed format, not clean JSON.
-The data is interleaved with SvelteKit metadata. Parsing requires understanding
-the SvelteKit dehydration format.
+| Endpoint | Method | Response Shape / Details |
+|---|---|---|
+| `/portal/meters/{id}/geo` | GET | `{data: {latitude: "...", longitude: "..."}}` (strings with ~15 decimal digits) |
+| `/portal/meters/{id}/energy` | GET | `{data: [{timestamp, kwh, kvah, voltR, ...}]}`. 30-min steps, 7-day window (e.g. ending 30/06/2026 23:30), `DD/MM/YYYY HH:mm` no tz |
+| `/meters/{id}/__data.json?x-sveltekit-invalidated=001` | GET | SvelteKit devalue format: nameplate detail + 7-level breadcrumb (`Name (CODE)`) |
+| `/meters/__data.json` | GET | Dehydrated SvelteKit meters list |
+| `/transformers/__data.json` | GET | Dehydrated SvelteKit transformers list |
+
+- **Hierarchy Discovery**: There is **no dedicated hierarchy endpoint**. The full 7-level tree must be synthesized by aggregating breadcrumbs across all 403 meters (`/meters/{id}`).
+- **Login Action Response**: SvelteKit form action returns `{"type": "redirect", "status": 303, "location": "/meters"}` on successful auth.
 
 ## 9. Quirks & Edge Cases
 
-- **No CSRF token** on login form (unusual for a production app).
+- **No CSRF token** on login form.
+- **Login Redirect**: Returns 303 redirect to `/meters`.
 - **No transformer detail pages** — the CODE values are not clickable/linked.
-- **Coordinate precision** varies — some have 15+ decimal places.
+- **Coordinate precision** varies — up to 15+ decimal places; strings in JSON geo endpoint.
 - **L&T make** contains an ampersand (`&`) which appears as `L&amp;T` in HTML.
 - **Decommissioned meters** still show readings data.
+- **Timestamp format**: Portal timestamps are unzoned local time (`DD/MM/YYYY HH:mm`, assumed Asia/Kolkata IST UTC+05:30).
 - **Search** is by "meter number or serial" — **UNKNOWN** if server-side or client filter.
+

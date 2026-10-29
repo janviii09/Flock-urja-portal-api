@@ -20,3 +20,7 @@ One line per decision, dated. Categories: `DECISION`, `ASSUMPTION`, `TRADE-OFF`,
 | 2026-10-28 | DECISION    | Session expiry detects both HTTP 401/403 and SvelteKit redirects to login page with HTML password form. |
 | 2026-10-28 | DECISION    | Re-authentication on session expiry retries exactly once to prevent infinite auth loops. |
 | 2026-10-28 | DECISION    | Concurrency limited at HTTP client level via `asyncio.Semaphore` to protect legacy portal. |
+| 2026-10-29 | DECISION    | HTML adapters implemented via BeautifulSoup4 + lxml; raise `PortalShapeError(field=...)` on structural deviation. |
+| 2026-10-29 | DECISION    | Portal timestamps treated as IST (UTC+05:30) and converted to UTC datetime, keeping `raw_timestamp` for provenance. |
+| 2026-10-29 | DECISION    | Data quirks (null island `(0,0)`, non-monotonic kWh, unknown enums, missing nameplates) captured in `quality_flags` without dropping rows. |
+

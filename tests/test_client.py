@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -342,3 +344,195 @@ async def test_invalid_credentials_raises_authentication_error():
     ) as client:
         with pytest.raises(AuthenticationError, match="Authentication failed"):
             await client.login()
+
+
+@pytest.mark.asyncio
+async def test_missing_credentials_raises_authentication_error():
+    """Login with empty credentials raises AuthenticationError immediately."""
+    transport = httpx.MockTransport(lambda req: httpx.Response(200))
+    async with PortalClient(
+        base_url="https://test.portal",
+        email="",
+        password="",
+        transport=transport,
+    ) as client:
+        with pytest.raises(AuthenticationError, match="Missing portal credentials"):
+            await client.login()
+
+
+@pytest.mark.asyncio
+async def test_session_expiry_detected_by_html_body_content():
+    """Session expiry detected when 200 response body contains login form fields."""
+    step = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal step
+        if request.url.path == "/login" and request.method == "POST":
+            return httpx.Response(200, text="Login OK")
+
+        if request.url.path == "/meters":
+            step += 1
+            if step == 1:
+                # 200 OK but body contains login form (no URL redirect)
+                return httpx.Response(
+                    200,
+                    headers={"Content-Type": "text/html"},
+                    text=LOGIN_PAGE_HTML,
+                )
+            return httpx.Response(200, text=METERS_LIST_PAGE_HTML)
+
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with PortalClient(
+        base_url="https://test.portal",
+        email="op@urja.local",
+        password="secret",
+        transport=transport,
+        base_delay=0.01,
+        jitter=0,
+    ) as client:
+        client._is_logged_in = True
+        resp = await client.get("/meters")
+        assert resp.status_code == 200
+        assert "J100000" in resp.text
+        assert step == 2
+
+
+@pytest.mark.asyncio
+async def test_transport_error_retry_with_eventual_success():
+    """Transport errors (e.g. ConnectionError) retry with backoff and succeed."""
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/login":
+            return httpx.Response(200, text="Login OK")
+        if request.url.path == "/meters":
+            attempts += 1
+            if attempts < 3:
+                raise httpx.ConnectError("Connection refused", request=request)
+            return httpx.Response(200, text=METERS_LIST_PAGE_HTML)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with PortalClient(
+        base_url="https://test.portal",
+        email="op@urja.local",
+        password="secret",
+        max_retries=3,
+        base_delay=0.01,
+        jitter=0,
+        transport=transport,
+    ) as client:
+        resp = await client.get("/meters")
+        assert resp.status_code == 200
+        assert attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_transport_error_retry_cap_raises_unavailable():
+    """Transport errors exceeding max_retries raise PortalUnavailableError."""
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/login":
+            return httpx.Response(200, text="Login OK")
+        if request.url.path == "/meters":
+            attempts += 1
+            raise httpx.ConnectError("Connection refused", request=request)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with PortalClient(
+        base_url="https://test.portal",
+        email="op@urja.local",
+        password="secret",
+        max_retries=3,
+        base_delay=0.01,
+        jitter=0,
+        transport=transport,
+    ) as client:
+        with pytest.raises(PortalUnavailableError, match="Transport error"):
+            await client.get("/meters")
+        assert attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_429_rate_limit_retry():
+    """429 Too Many Requests is treated as transient and retried."""
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/login":
+            return httpx.Response(200, text="Login OK")
+        if request.url.path == "/meters":
+            attempts += 1
+            if attempts < 2:
+                return httpx.Response(429, text="Rate limited")
+            return httpx.Response(200, text=METERS_LIST_PAGE_HTML)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with PortalClient(
+        base_url="https://test.portal",
+        email="op@urja.local",
+        password="secret",
+        max_retries=3,
+        base_delay=0.01,
+        jitter=0,
+        transport=transport,
+    ) as client:
+        resp = await client.get("/meters")
+        assert resp.status_code == 200
+        assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrency_semaphore_limits_parallel_requests():
+    """Concurrency semaphore enforces max parallel requests."""
+    max_concurrent = 0
+    current_concurrent = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal max_concurrent, current_concurrent
+        if request.url.path == "/login":
+            return httpx.Response(200, text="Login OK")
+        current_concurrent += 1
+        max_concurrent = max(max_concurrent, current_concurrent)
+        await asyncio.sleep(0.02)
+        current_concurrent -= 1
+        return httpx.Response(200, text=METERS_LIST_PAGE_HTML)
+
+    transport = httpx.MockTransport(handler)
+    async with PortalClient(
+        base_url="https://test.portal",
+        email="op@urja.local",
+        password="secret",
+        concurrency_limit=2,
+        transport=transport,
+        base_delay=0.01,
+        jitter=0,
+    ) as client:
+        client._is_logged_in = True
+        tasks = [client.get(f"/meters?page={i}") for i in range(6)]
+        responses = await asyncio.gather(*tasks)
+        assert all(r.status_code == 200 for r in responses)
+        assert max_concurrent <= 2
+
+
+@pytest.mark.asyncio
+async def test_read_only_guard_rejects_all_mutating_methods():
+    """Portal client refuses PUT, PATCH, DELETE, HEAD (non-GET) requests."""
+    transport = httpx.MockTransport(lambda req: httpx.Response(200))
+    async with PortalClient(
+        base_url="https://test.portal",
+        email="op@urja.local",
+        password="secret",
+        transport=transport,
+    ) as client:
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            with pytest.raises(ReadOnlyGuardError, match=f"refusing {method} request"):
+                await client.request(method, "/meters")
