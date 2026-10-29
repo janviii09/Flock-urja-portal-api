@@ -190,6 +190,11 @@ class Store:
 
     def get_meter(self, meter_id: str) -> Meter | None:
         """Fetch a single meter by ID, reconstructing domain submodels."""
+        res = self.get_meter_with_provenance(meter_id)
+        return res[0] if res else None
+
+    def get_meter_with_provenance(self, meter_id: str) -> tuple[Meter, datetime] | None:
+        """Fetch a meter along with its fetched_at timestamp."""
         with self._lock:
             cursor = self._conn.cursor()
             cursor.execute(
@@ -199,7 +204,7 @@ class Store:
             row = cursor.fetchone()
             if row is None:
                 return None
-            return self._row_to_meter(row)
+            return self._row_to_meter(row), _iso_to_dt(row["fetched_at"])
 
     def list_meters(
         self,
@@ -227,6 +232,61 @@ class Store:
             cursor = self._conn.cursor()
             cursor.execute(query, params)
             return [self._row_to_meter(r) for r in cursor.fetchall()]
+
+    def list_meters_cursor(
+        self,
+        cursor: str | None = None,
+        limit: int = 20,
+        dt_code: str | None = None,
+        serial_no: str | None = None,
+        make: str | None = None,
+        phase_type: str | None = None,
+        installation_status: str | None = None,
+    ) -> tuple[list[Meter], str | None, bool, datetime | None]:
+        """Fetch a page of meters using cursor pagination (meter_id > cursor).
+
+        Returns:
+            (items, next_cursor, has_more, latest_fetched_at)
+        """
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if cursor:
+            conditions.append("meter_id > ?")
+            params.append(cursor.strip().upper())
+        if dt_code:
+            conditions.append("dt_code = ?")
+            params.append(dt_code.strip().upper())
+        if serial_no:
+            conditions.append("serial_no = ?")
+            params.append(serial_no.strip())
+        if make:
+            conditions.append("make = ?")
+            params.append(make.strip())
+        if phase_type:
+            conditions.append("phase_type = ?")
+            params.append(phase_type.strip().lower())
+        if installation_status:
+            conditions.append("installation_status = ?")
+            params.append(installation_status.strip())
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        query = f"SELECT * FROM meters {where} ORDER BY meter_id ASC LIMIT ?"
+        # Fetch limit + 1 to detect next page
+        params.append(limit + 1)
+
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+            latest_fetched_at = max(_iso_to_dt(r["fetched_at"]) for r in rows) if rows else None
+            has_more = len(rows) > limit
+            page_rows = rows[:limit]
+            meters = [self._row_to_meter(r) for r in page_rows]
+            next_cursor = meters[-1].meter_id if has_more and meters else None
+
+            return meters, next_cursor, has_more, latest_fetched_at
 
     def count_meters(self, dt_code: str | None = None) -> int:
         """Count total meters in store, optionally filtered by DT code."""
@@ -388,12 +448,26 @@ class Store:
         since: datetime | None = None,
     ) -> list[Reading]:
         """Fetch consumption readings for a meter ordered by timestamp descending."""
+        readings, _ = self.get_readings_range(meter_id=meter_id, since=since, limit=limit)
+        return readings
+
+    def get_readings_range(
+        self,
+        meter_id: str,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+    ) -> tuple[list[Reading], datetime | None]:
+        """Fetch readings within date range, returning (readings, latest_fetched_at)."""
         conditions = ["meter_id = ?"]
         params: list[Any] = [meter_id.strip().upper()]
 
         if since is not None:
             conditions.append("timestamp >= ?")
             params.append(_dt_to_iso(since))
+        if until is not None:
+            conditions.append("timestamp <= ?")
+            params.append(_dt_to_iso(until))
 
         where = f"WHERE {' AND '.join(conditions)}"
         query = f"SELECT * FROM readings {where} ORDER BY timestamp DESC LIMIT ?"
@@ -402,7 +476,9 @@ class Store:
         with self._lock:
             cursor = self._conn.cursor()
             cursor.execute(query, params)
-            return [self._row_to_reading(r) for r in cursor.fetchall()]
+            rows = cursor.fetchall()
+            latest_fetched_at = max(_iso_to_dt(r["fetched_at"]) for r in rows) if rows else None
+            return [self._row_to_reading(r) for r in rows], latest_fetched_at
 
     def _row_to_reading(self, row: sqlite3.Row) -> Reading:
         flags = json.loads(row["quality_flags"]) if row["quality_flags"] else []

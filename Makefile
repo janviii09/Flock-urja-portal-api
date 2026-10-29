@@ -23,4 +23,4 @@ format:
 	$(RUFF) format src/ tests/
 
 openapi:
-	$(PYTHON) -c "import json; from urja.api.app import app; print(json.dumps(app.openapi(), indent=2))" > openapi.json
+	$(PYTHON) scripts/export_openapi.py

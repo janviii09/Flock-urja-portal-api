@@ -21,7 +21,11 @@ from urja.adapters import (
     parse_pagination,
     parse_transformers,
 )
-from urja.client.exceptions import PortalError, PortalShapeError
+from urja.client.exceptions import (
+    MeterNotFoundError,
+    PortalError,
+    PortalShapeError,
+)
 from urja.client.portal import PortalClient
 from urja.domain.models import (
     Provenance,
@@ -142,6 +146,11 @@ class SyncEngine:
         """
         endpoint = f"/meters/{meter_id}"
         resp = await client.get(endpoint)
+        if resp.status_code == 404:
+            raise MeterNotFoundError(meter_id)
+        if resp.status_code >= 400:
+            raise PortalError(f"HTTP {resp.status_code} fetching {endpoint}")
+
         payload_hash = compute_payload_hash(resp.text)
         fetched_at = datetime.now(timezone.utc)
         provenance = Provenance(

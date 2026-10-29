@@ -38,3 +38,11 @@ class PortalShapeError(PortalError):
     def __init__(self, message: str, field: str | None = None) -> None:
         super().__init__(message)
         self.field = field
+
+
+class MeterNotFoundError(PortalError):
+    """Raised when a meter ID does not exist on the portal or in the store."""
+
+    def __init__(self, meter_id: str) -> None:
+        self.meter_id = meter_id
+        super().__init__(f"Meter '{meter_id}' not found.")

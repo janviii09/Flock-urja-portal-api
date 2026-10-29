@@ -27,5 +27,11 @@ One line per decision, dated. Categories: `DECISION`, `ASSUMPTION`, `TRADE-OFF`,
 | 2026-10-29 | DECISION    | Exact index justifications: `meters(dt_code)` for hierarchy, `meters(serial_no)` for search, `readings(timestamp)` for cross-meter ranges, `hierarchy_nodes(parent_code, level)` for tree traversal, `sync_runs(started_at DESC)` for freshness. |
 | 2026-10-29 | DECISION    | Entity-level change detection on upsert: only actual field updates count as `CHANGED`; identical data is marked `UNCHANGED`. |
 | 2026-10-29 | DECISION    | Fault-isolated sync transactions: individual page or meter detail failures roll back atomically without corrupting previously synced records. |
+| 2026-10-29 | DECISION    | Tiered freshness TTLs: master data 1h, recent consumption (<24h) 5m, historical consumption (>24h) 30d (immutable). |
+| 2026-10-29 | DECISION    | Single-flight deduplication via `asyncio.Future` coalesces concurrent queries for expired resources into a single upstream request. |
+| 2026-10-29 | DECISION    | RFC 7807 Problem Details (`application/problem+json`) enforced for all 4xx/5xx error responses. |
+| 2026-10-29 | DECISION    | Cursor pagination (`meter_id > cursor`) on `/v1/meters` for stable O(1) page access. |
+| 2026-10-29 | DECISION    | Every API response envelope includes `meta: {fetched_at, age_seconds, stale, source}`. |
+
 
 

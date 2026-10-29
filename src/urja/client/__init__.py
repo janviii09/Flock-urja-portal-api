@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from urja.client.exceptions import (
     AuthenticationError,
+    MeterNotFoundError,
     PortalError,
     PortalRequestError,
     PortalShapeError,
@@ -15,6 +16,7 @@ from urja.client.portal import PortalClient
 
 __all__ = [
     "AuthenticationError",
+    "MeterNotFoundError",
     "PortalClient",
     "PortalError",
     "PortalRequestError",

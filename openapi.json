@@ -2,32 +2,994 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Urja Meter Ops API",
-    "description": "Clean REST API wrapping the legacy Urja Meter Ops portal. Provides access to smart-meter details, consumption readings, distribution transformers, and the network hierarchy.",
-    "version": "0.1.0"
+    "description": "Clean, documented REST API wrapping the legacy Urja Meter Ops utility portal.\n\n### Key Capabilities:\n- **Meters List**: Query smart meters with cursor pagination and multi-parameter filters.\n- **Meter Detail**: Full nameplate, GPS coordinates, and 7-level hierarchy path (`Zone \u203a Circle \u203a Division \u203a Subdivision \u203a Substation \u203a Feeder \u203a DT`).\n- **Consumption**: 30-minute interval readings time series with date window filtering.\n- **Freshness Engine**: Per-resource TTLs, single-flight request coalescing, and stale-while-revalidate.\n- **Error Handling**: RFC 7807 Problem Details on all failure responses (`application/problem+json`).",
+    "version": "1.0.0"
   },
   "paths": {
-    "/health": {
+    "/v1/meters": {
       "get": {
         "tags": [
-          "ops"
+          "v1"
         ],
-        "summary": "Health",
-        "description": "Basic liveness check.",
-        "operationId": "health_health_get",
+        "summary": "List smart meters with cursor pagination and filtering",
+        "description": "Retrieves a paginated list of smart meters from the local store. Supports filtering by distribution transformer code, serial number, manufacturer, phase type, and installation status. Includes provenance and cache freshness metadata in the `meta` envelope.",
+        "operationId": "list_meters_v1_meters_get",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Opaque pagination cursor (meter_id to paginate after).",
+              "examples": [
+                "J100020"
+              ],
+              "title": "Cursor"
+            },
+            "description": "Opaque pagination cursor (meter_id to paginate after)."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Number of meters to return per page (max 100).",
+              "default": 20,
+              "title": "Limit"
+            },
+            "description": "Number of meters to return per page (max 100)."
+          },
+          {
+            "name": "dt_code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by Distribution Transformer code.",
+              "examples": [
+                "DT-001"
+              ],
+              "title": "Dt Code"
+            },
+            "description": "Filter by Distribution Transformer code."
+          },
+          {
+            "name": "serial_no",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by meter serial number.",
+              "examples": [
+                "SE33962"
+              ],
+              "title": "Serial No"
+            },
+            "description": "Filter by meter serial number."
+          },
+          {
+            "name": "make",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by meter manufacturer (e.g. HPL, L&T, Secure).",
+              "title": "Make"
+            },
+            "description": "Filter by meter manufacturer (e.g. HPL, L&T, Secure)."
+          },
+          {
+            "name": "phase",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/PhaseType"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by phase type (single or three).",
+              "title": "Phase"
+            },
+            "description": "Filter by phase type (single or three)."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/InstallationStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by installation status (Installed, Faulty, Decommissioned).",
+              "title": "Status"
+            },
+            "description": "Filter by installation status (Installed, Faulty, Decommissioned)."
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Health Health Get"
+                  "$ref": "#/components/schemas/MeterListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
           }
         }
+      }
+    },
+    "/v1/meters/{meter_id}": {
+      "get": {
+        "tags": [
+          "v1"
+        ],
+        "summary": "Get detailed meter information",
+        "description": "Retrieves complete details for a single smart meter, including nameplate attributes, GPS coordinates, and the reconstructed 7-level network hierarchy breadcrumb. If data in the local store is missing or stale, triggers a single-flight refresh from the portal. If portal refresh fails, serves stale store data (stale-while-revalidate).",
+        "operationId": "get_meter_detail_v1_meters__meter_id__get",
+        "parameters": [
+          {
+            "name": "meter_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Meter Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeterDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/meters/{meter_id}/consumption": {
+      "get": {
+        "tags": [
+          "v1"
+        ],
+        "summary": "Get meter consumption time series",
+        "description": "Retrieves 30-minute interval consumption readings (kWh, kVAh, voltage) for a meter. Supports date filtering via `from` and `to` query parameters. Applies freshness rules: recent readings (<24h old) have a 5-minute TTL; historical readings older than 24 hours are treated as immutable.",
+        "operationId": "get_meter_consumption_v1_meters__meter_id__consumption_get",
+        "parameters": [
+          {
+            "name": "meter_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Meter Id"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter readings starting from this timestamp (inclusive ISO-8601).",
+              "title": "From"
+            },
+            "description": "Filter readings starting from this timestamp (inclusive ISO-8601)."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter readings up to this timestamp (inclusive ISO-8601).",
+              "title": "To"
+            },
+            "description": "Filter readings up to this timestamp (inclusive ISO-8601)."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "description": "Maximum number of reading entries to return.",
+              "default": 100,
+              "title": "Limit"
+            },
+            "description": "Maximum number of reading entries to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsumptionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "tags": [
+          "v1"
+        ],
+        "summary": "Liveness check, portal connectivity, and sync status",
+        "description": "Reports the operational health of the API service, upstream connectivity to the Urja Meter Ops legacy portal, and details of the most recent data sync run.",
+        "operationId": "health_v1_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "Liveness check",
+        "description": "Root liveness probe check.",
+        "operationId": "root_health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Root Health Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ConsumptionResponse": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/Reading"
+            },
+            "type": "array",
+            "title": "Data",
+            "description": "Time series consumption readings ordered descending by timestamp."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta",
+            "description": "Cache freshness and origin metadata."
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "ConsumptionResponse",
+        "description": "Response payload for GET /v1/meters/{id}/consumption."
+      },
+      "CursorPagination": {
+        "properties": {
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor",
+            "description": "Opaque cursor token for fetching the next page."
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "description": "True if additional pages are available beyond this result set."
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "Total number of records matching query filters in the store."
+          }
+        },
+        "type": "object",
+        "required": [
+          "has_more",
+          "total"
+        ],
+        "title": "CursorPagination",
+        "description": "Cursor-based pagination envelope."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "Service health: 'ok' or 'degraded'."
+          },
+          "portal_reachable": {
+            "type": "boolean",
+            "title": "Portal Reachable",
+            "description": "True if the legacy portal is accessible."
+          },
+          "last_sync": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SyncRun"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Details of the most recent synchronization job."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta",
+            "description": "Freshness metadata for the health evaluation."
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "portal_reachable",
+          "meta"
+        ],
+        "title": "HealthResponse",
+        "description": "System health and upstream portal status."
+      },
+      "HierarchyLevel": {
+        "type": "string",
+        "enum": [
+          "zone",
+          "circle",
+          "division",
+          "subdivision",
+          "substation",
+          "feeder",
+          "dt"
+        ],
+        "title": "HierarchyLevel",
+        "description": "Network hierarchy levels, top to bottom.\n\nObserved breadcrumb pattern on meter detail page:\nZone > Circle > Division > Subdivision > Substation > Feeder > DT"
+      },
+      "HierarchyNode": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "level": {
+            "$ref": "#/components/schemas/HierarchyLevel"
+          },
+          "parent_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Code"
+          },
+          "quality_flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Quality Flags"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "name",
+          "level"
+        ],
+        "title": "HierarchyNode",
+        "description": "A single node in the network hierarchy."
+      },
+      "HierarchyPath": {
+        "properties": {
+          "zone": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HierarchyNode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "circle": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HierarchyNode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "division": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HierarchyNode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "subdivision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HierarchyNode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "substation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HierarchyNode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "feeder": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HierarchyNode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HierarchyNode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "quality_flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Quality Flags"
+          }
+        },
+        "type": "object",
+        "title": "HierarchyPath",
+        "description": "Full path from zone down to DT for a meter, as shown in the breadcrumb."
+      },
+      "InstallationStatus": {
+        "type": "string",
+        "enum": [
+          "Installed",
+          "Faulty",
+          "Decommissioned"
+        ],
+        "title": "InstallationStatus",
+        "description": "Meter status values observed on the portal."
+      },
+      "Location": {
+        "properties": {
+          "latitude": {
+            "type": "number",
+            "title": "Latitude"
+          },
+          "longitude": {
+            "type": "number",
+            "title": "Longitude"
+          },
+          "quality_flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Quality Flags"
+          }
+        },
+        "type": "object",
+        "required": [
+          "latitude",
+          "longitude"
+        ],
+        "title": "Location",
+        "description": "GPS coordinates from the meter detail page.\n\nPortal displays as: \"26.938961002479868, 75.83095696146852\"\nwith label \"Latitude / Longitude\"."
+      },
+      "Meter": {
+        "properties": {
+          "meter_id": {
+            "type": "string",
+            "title": "Meter Id"
+          },
+          "serial_no": {
+            "type": "string",
+            "title": "Serial No"
+          },
+          "make": {
+            "type": "string",
+            "title": "Make"
+          },
+          "phase_type": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PhaseType"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "installation_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InstallationStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "installation_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Installation Type"
+          },
+          "dt_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dt Code"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Location"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hierarchy_path": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HierarchyPath"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "quality_flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Quality Flags"
+          }
+        },
+        "type": "object",
+        "required": [
+          "meter_id",
+          "serial_no",
+          "make"
+        ],
+        "title": "Meter",
+        "description": "A smart meter as shown on the portal.\n\nList page columns: METER, SERIAL, MAKE, PHASE, STATUS, DT\nDetail page adds: Installation Type, Location, Consumption, hierarchy breadcrumb."
+      },
+      "MeterDetailResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Meter",
+            "description": "Full smart meter detail."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta",
+            "description": "Cache freshness and origin metadata."
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "MeterDetailResponse",
+        "description": "Response payload for GET /v1/meters/{id}."
+      },
+      "MeterListResponse": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/Meter"
+            },
+            "type": "array",
+            "title": "Data",
+            "description": "List of smart meters."
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/CursorPagination",
+            "description": "Cursor pagination details."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta",
+            "description": "Cache freshness and origin metadata."
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "pagination",
+          "meta"
+        ],
+        "title": "MeterListResponse",
+        "description": "Response payload for GET /v1/meters."
+      },
+      "PhaseType": {
+        "type": "string",
+        "enum": [
+          "single",
+          "three"
+        ],
+        "title": "PhaseType",
+        "description": "Phase types observed on the portal."
+      },
+      "Reading": {
+        "properties": {
+          "meter_id": {
+            "type": "string",
+            "title": "Meter Id"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Timestamp"
+          },
+          "kwh": {
+            "type": "number",
+            "title": "Kwh"
+          },
+          "kvah": {
+            "type": "number",
+            "title": "Kvah"
+          },
+          "voltage_r": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Voltage R"
+          },
+          "quality_flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Quality Flags"
+          }
+        },
+        "type": "object",
+        "required": [
+          "meter_id",
+          "timestamp",
+          "kwh",
+          "kvah"
+        ],
+        "title": "Reading",
+        "description": "A single consumption reading row from the meter detail page.\n\nColumns: TIMESTAMP, KWH, KVAH, V(R)\nTimestamps look like: \"23/06/2026 23:30\" (DD/MM/YYYY HH:MM).\nKWH/KVAH are cumulative floats; V(R) is voltage (integer-ish)."
+      },
+      "ResponseMeta": {
+        "properties": {
+          "fetched_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Fetched At"
+          },
+          "age_seconds": {
+            "type": "number",
+            "title": "Age Seconds"
+          },
+          "stale": {
+            "type": "boolean",
+            "title": "Stale"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          }
+        },
+        "type": "object",
+        "required": [
+          "fetched_at",
+          "age_seconds",
+          "stale",
+          "source"
+        ],
+        "title": "ResponseMeta",
+        "description": "Provenance and cache freshness metadata included on every API response."
+      },
+      "SyncRun": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SyncStatus",
+            "default": "running"
+          },
+          "resource": {
+            "type": "string",
+            "title": "Resource"
+          },
+          "items_new": {
+            "type": "integer",
+            "title": "Items New",
+            "default": 0
+          },
+          "items_changed": {
+            "type": "integer",
+            "title": "Items Changed",
+            "default": 0
+          },
+          "items_unchanged": {
+            "type": "integer",
+            "title": "Items Unchanged",
+            "default": 0
+          },
+          "items_failed": {
+            "type": "integer",
+            "title": "Items Failed",
+            "default": 0
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "started_at",
+          "resource"
+        ],
+        "title": "SyncRun",
+        "description": "Audit record for a synchronization operation."
+      },
+      "SyncStatus": {
+        "type": "string",
+        "enum": [
+          "running",
+          "success",
+          "partial_failure",
+          "failed"
+        ],
+        "title": "SyncStatus",
+        "description": "Status lifecycle of a sync run."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
       }
     }
   }
