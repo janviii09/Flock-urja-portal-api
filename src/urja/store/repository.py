@@ -123,7 +123,7 @@ class Store:
             cursor = self._conn.cursor()
             cursor.execute(
                 "SELECT serial_no, make, phase_type, installation_status, "
-                "installation_type, build, dt_code, latitude, longitude, payload_hash "
+                "installation_type, build, dt_code, latitude, longitude, hierarchy_json, payload_hash "
                 "FROM meters WHERE meter_id = ?",
                 (meter.meter_id,),
             )
@@ -161,15 +161,16 @@ class Store:
 
             # Change detection: check if entity data fields changed
             unchanged = (
-                existing["serial_no"] == meter.serial_no
-                and existing["make"] == meter.make
-                and existing["phase_type"] == phase
-                and existing["installation_status"] == status
-                and existing["installation_type"] == meter.installation_type
-                and existing["build"] == meter.build
-                and existing["dt_code"] == meter.dt_code
-                and existing["latitude"] == lat
-                and existing["longitude"] == lon
+                (meter.serial_no is None or existing["serial_no"] == meter.serial_no)
+                and (meter.make is None or existing["make"] == meter.make)
+                and (phase is None or existing["phase_type"] == phase)
+                and (status is None or existing["installation_status"] == status)
+                and (meter.installation_type is None or existing["installation_type"] == meter.installation_type)
+                and (meter.build is None or existing["build"] == meter.build)
+                and (meter.dt_code is None or existing["dt_code"] == meter.dt_code)
+                and (lat is None or existing["latitude"] == lat)
+                and (lon is None or existing["longitude"] == lon)
+                and (hierarchy_json is None or existing["hierarchy_json"] == hierarchy_json)
             )
 
             if unchanged:
@@ -184,15 +185,15 @@ class Store:
             cursor.execute(
                 """
                 UPDATE meters SET
-                    serial_no = ?,
-                    make = ?,
-                    phase_type = ?,
-                    installation_status = ?,
-                    installation_type = ?,
-                    build = ?,
-                    dt_code = ?,
-                    latitude = ?,
-                    longitude = ?,
+                    serial_no = COALESCE(?, serial_no),
+                    make = COALESCE(?, make),
+                    phase_type = COALESCE(?, phase_type),
+                    installation_status = COALESCE(?, installation_status),
+                    installation_type = COALESCE(?, installation_type),
+                    build = COALESCE(?, build),
+                    dt_code = COALESCE(?, dt_code),
+                    latitude = COALESCE(?, latitude),
+                    longitude = COALESCE(?, longitude),
                     hierarchy_json = COALESCE(?, hierarchy_json),
                     quality_flags = ?,
                     fetched_at = ?,
@@ -320,13 +321,35 @@ class Store:
 
             return meters, next_cursor, has_more, latest_fetched_at
 
-    def count_meters(self, dt_code: str | None = None) -> int:
-        """Count total meters in store, optionally filtered by DT code."""
-        query = "SELECT COUNT(*) FROM meters"
+    def count_meters(
+        self,
+        dt_code: str | None = None,
+        serial_no: str | None = None,
+        make: str | None = None,
+        phase_type: str | None = None,
+        installation_status: str | None = None,
+    ) -> int:
+        """Count total meters in store, optionally filtered by attributes."""
+        conditions: list[str] = []
         params: list[Any] = []
         if dt_code:
-            query += " WHERE dt_code = ?"
+            conditions.append("dt_code = ?")
             params.append(dt_code.strip().upper())
+        if serial_no:
+            conditions.append("serial_no = ?")
+            params.append(serial_no.strip())
+        if make:
+            conditions.append("make = ?")
+            params.append(make.strip())
+        if phase_type:
+            conditions.append("phase_type = ?")
+            params.append(phase_type.strip().lower())
+        if installation_status:
+            conditions.append("installation_status = ?")
+            params.append(installation_status.strip())
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        query = f"SELECT COUNT(*) FROM meters {where}"
         with self._lock:
             cursor = self._conn.cursor()
             cursor.execute(query, params)
@@ -415,11 +438,25 @@ class Store:
                 parsed_h = json.loads(row["hierarchy_json"])
                 if isinstance(parsed_h, dict):
                     raw_hierarchy = parsed_h
-                    if any(k in parsed_h for k in ("zone", "circle", "division", "dt")):
-                        try:
-                            hierarchy_path = HierarchyPath(**parsed_h)
-                        except Exception:
-                            hierarchy_path = None
+                    # 1. Try deserializing into typed HierarchyPath domain model first
+                    try:
+                        hierarchy_path = HierarchyPath(**parsed_h)
+                    except Exception:
+                        # 2. Fall back to reconstructing breadcrumb string list
+                        breadcrumb: list[str] = []
+                        for lvl in ("zone", "circle", "division", "subdivision", "substation", "feeder", "dt"):
+                            node = parsed_h.get(lvl)
+                            if isinstance(node, dict):
+                                name = node.get("name") or "Unnamed"
+                                code = node.get("code") or ""
+                                breadcrumb.append(f"{name} ({code})" if code else name)
+                        if not breadcrumb:
+                            for lvl in ("Zone", "Circle", "Division", "Subdivision", "Sub Station", "Feeder", "DT"):
+                                val = parsed_h.get(lvl)
+                                if isinstance(val, str) and val.strip():
+                                    breadcrumb.append(val.strip())
+                        if breadcrumb:
+                            hierarchy_path = breadcrumb
                 elif isinstance(parsed_h, list):
                     hierarchy_path = parsed_h
             except Exception as e:

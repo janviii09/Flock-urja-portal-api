@@ -157,6 +157,7 @@ uvicorn urja.api.app:app --host 0.0.0.0 --port 8000 --reload
 Once running:
 - Swagger UI: `http://localhost:8000/docs`
 - ReDoc: `http://localhost:8000/redoc`
+- Scalar: `http://localhost:8000/scalar`
 - OpenAPI JSON: `http://localhost:8000/openapi.json`
 
 **Tests and lint:**

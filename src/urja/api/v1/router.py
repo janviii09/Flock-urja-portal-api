@@ -117,7 +117,13 @@ async def list_meters(
         phase_type=phase.value if phase else None,
         installation_status=status.value if status else None,
     )
-    total = store.count_meters(dt_code=dt_code)
+    total = store.count_meters(
+        dt_code=dt_code,
+        serial_no=serial_no,
+        make=make,
+        phase_type=phase.value if phase else None,
+        installation_status=status.value if status else None,
+    )
 
     # 2. If store has never been populated, attempt single-flight seed sync
     source = "store"
@@ -136,7 +142,13 @@ async def list_meters(
                 phase_type=phase.value if phase else None,
                 installation_status=status.value if status else None,
             )
-            total = store.count_meters(dt_code=dt_code)
+            total = store.count_meters(
+                dt_code=dt_code,
+                serial_no=serial_no,
+                make=make,
+                phase_type=phase.value if phase else None,
+                installation_status=status.value if status else None,
+            )
             source = "portal"
         except Exception as e:
             logger.warning("Auto-seed meters list sync failed: %s", e)

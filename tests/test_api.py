@@ -363,11 +363,19 @@ class TestEndpointsAndPagination:
             r_dt = await api_client.get("/v1/meters?dt_code=DT-001")
             assert len(r_dt.json()["data"]) == 1
             assert r_dt.json()["data"][0]["meter_id"] == "J100001"
+            assert r_dt.json()["pagination"]["total"] == 1
 
             # Filter by make
             r_make = await api_client.get("/v1/meters?make=L%26T")
             assert len(r_make.json()["data"]) == 1
             assert r_make.json()["data"][0]["meter_id"] == "J100002"
+            assert r_make.json()["pagination"]["total"] == 1
+
+            # Filter by phase
+            r_phase = await api_client.get("/v1/meters?phase=three")
+            assert len(r_phase.json()["data"]) == 1
+            assert r_phase.json()["data"][0]["meter_id"] == "J100002"
+            assert r_phase.json()["pagination"]["total"] == 1
 
     @pytest.mark.asyncio
     async def test_meter_consumption_date_filtering(self, test_setup):
@@ -454,12 +462,17 @@ class TestRFC7807Errors:
 
     @pytest.mark.asyncio
     async def test_docs_and_openapi_served(self, test_setup):
-        """FastAPI serves /docs and /openapi.json."""
+        """FastAPI serves /docs, /redoc, /scalar, and /openapi.json."""
         async with httpx.AsyncClient(
             transport=ASGITransport(app=app), base_url="http://testserver"
         ) as api_client:
             docs_resp = await api_client.get("/docs")
             assert docs_resp.status_code == 200
+            redoc_resp = await api_client.get("/redoc")
+            assert redoc_resp.status_code == 200
+            scalar_resp = await api_client.get("/scalar")
+            assert scalar_resp.status_code == 200
+            assert "api-reference" in scalar_resp.text
             openapi_resp = await api_client.get("/openapi.json")
             assert openapi_resp.status_code == 200
             spec = openapi_resp.json()

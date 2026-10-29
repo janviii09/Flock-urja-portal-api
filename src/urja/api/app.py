@@ -5,6 +5,7 @@ from __future__ import annotations
 import httpx
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from urja.api.errors import (
@@ -57,3 +58,23 @@ app.include_router(v1_router)
 async def root_health() -> dict[str, str]:
     """Root liveness probe check."""
     return {"status": "ok"}
+
+
+@app.get("/scalar", include_in_schema=False)
+async def scalar_docs() -> HTMLResponse:
+    """Render interactive API documentation via Scalar."""
+    html_content = """
+    <!doctype html>
+    <html>
+      <head>
+        <title>Urja Meter Ops API — Scalar Reference</title>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+      </head>
+      <body>
+        <script id="api-reference" data-url="/openapi.json"></script>
+        <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+      </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
