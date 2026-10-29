@@ -2,6 +2,8 @@
 
 A REST API wrapping the legacy **Urja Meter Ops** utility portal. The portal works fine for humans clicking around — it has no API, so this service handles auth, data extraction, caching, and exposes everything through clean JSON endpoints.
 
+**GitHub Repository**: [https://github.com/janviii09/Flock-urja-portal-api](https://github.com/janviii09/Flock-urja-portal-api)
+
 ---
 
 ## Table of Contents
@@ -354,8 +356,9 @@ For a production utility grid: PostgreSQL + PostGIS for spatial, `ltree` extensi
 
 ---
 
-## Key Documents
+## Key Documents & Repository
 
+- [GitHub Repository](https://github.com/janviii09/Flock-urja-portal-api) — Public submission repo.
 - [PROTOCOL.md](./PROTOCOL.md) — How the portal actually works, from direct observation.
 - [REFLECTION.md](./REFLECTION.md) — Reflection questions answered.
 - [openapi.json](./openapi.json) — Full OpenAPI 3.1.0 schema.
