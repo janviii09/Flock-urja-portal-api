@@ -306,6 +306,8 @@ curl -i "http://localhost:8000/v1/meters/INVALID ID"
 
 **Cursor pagination** — offset-based pagination is unstable (inserts shift results mid-page). Cursor pagination (`meter_id > last_seen`) gives stable, O(1) page access.
 
+**Ephemeral local cache model vs DB migrations** — the SQLite database acts as an offline operational cache populated from the portal. There is intentionally no Alembic migration system; if the schema evolves or data needs backfilling, running a clean resync (`python -m urja.sync` or deleting `urja.db`) idempotently recreates tables and repopulates all 403 meters in under 2 seconds.
+
 ---
 
 ## Assumptions

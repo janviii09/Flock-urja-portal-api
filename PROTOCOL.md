@@ -153,6 +153,7 @@ In addition to HTML SSR, the following direct JSON and SvelteKit endpoints exist
 - **Coordinate precision** varies — up to 15+ decimal places; strings in JSON geo endpoint.
 - **L&T make** contains an ampersand (`&`) which appears as `L&amp;T` in HTML.
 - **Decommissioned meters** still show readings data.
+- **SvelteKit `__data.json` Invalidated Bitmask**: When navigating between meters in the browser, SvelteKit requests `/meters/{id}/__data.json?x-sveltekit-invalidated=001`. The query parameter `x-sveltekit-invalidated=001` signals the server to skip re-evaluating unchanged root layout loaders (e.g. user session info in nodes 0 and 1, returned as `{"type": "skip"}`) and only serialize node 2 (the meter's nameplate and hierarchy).
 - **Timestamp format**: Portal timestamps are unzoned local time (`DD/MM/YYYY HH:mm`, assumed Asia/Kolkata IST UTC+05:30).
 - **Client-side Search via Backend Endpoint**: When typing into the search bar, the SvelteKit frontend fetches `/portal/meters/search?q={query}&page={page}` asynchronously. This endpoint returns structured JSON with 20 meters per page and the total meter count (403 total).
 

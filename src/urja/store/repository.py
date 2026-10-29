@@ -52,6 +52,18 @@ def _iso_to_dt(iso_str: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _json_equal(a: str | None, b: str | None) -> bool:
+    """Compare two serialized JSON strings for semantic dictionary equality."""
+    if a == b:
+        return True
+    if a is None or b is None:
+        return False
+    try:
+        return json.loads(a) == json.loads(b)
+    except Exception:
+        return a == b
+
+
 class Store:
     """SQLite repository for storing and querying Urja entity data.
 
@@ -170,7 +182,7 @@ class Store:
                 and (meter.dt_code is None or existing["dt_code"] == meter.dt_code)
                 and (lat is None or existing["latitude"] == lat)
                 and (lon is None or existing["longitude"] == lon)
-                and (hierarchy_json is None or existing["hierarchy_json"] == hierarchy_json)
+                and (hierarchy_json is None or _json_equal(existing["hierarchy_json"], hierarchy_json))
             )
 
             if unchanged:
@@ -431,6 +443,7 @@ class Store:
         if row["latitude"] is not None and row["longitude"] is not None:
             loc = Location(latitude=row["latitude"], longitude=row["longitude"])
 
+        flags = json.loads(row["quality_flags"]) if row["quality_flags"] else []
         hierarchy_path = None
         raw_hierarchy = None
         if row["hierarchy_json"]:
@@ -444,12 +457,17 @@ class Store:
                     except Exception:
                         # 2. Fall back to reconstructing breadcrumb string list
                         breadcrumb: list[str] = []
-                        for lvl in ("zone", "circle", "division", "subdivision", "substation", "feeder", "dt"):
+                        levels = ("zone", "circle", "division", "subdivision", "substation", "feeder", "dt")
+                        for lvl in levels:
                             node = parsed_h.get(lvl)
                             if isinstance(node, dict):
                                 name = node.get("name") or "Unnamed"
                                 code = node.get("code") or ""
                                 breadcrumb.append(f"{name} ({code})" if code else name)
+                            elif not any(k in parsed_h for k in ("Zone", "Circle")):
+                                missing_flag = f"missing_hierarchy_level:{lvl}"
+                                if missing_flag not in flags:
+                                    flags.append(missing_flag)
                         if not breadcrumb:
                             for lvl in ("Zone", "Circle", "Division", "Subdivision", "Sub Station", "Feeder", "DT"):
                                 val = parsed_h.get(lvl)
@@ -470,7 +488,6 @@ class Store:
         status = (
             InstallationStatus(row["installation_status"]) if row["installation_status"] else None
         )
-        flags = json.loads(row["quality_flags"]) if row["quality_flags"] else []
         cols = row.keys()
         build = row["build"] if "build" in cols else None
 

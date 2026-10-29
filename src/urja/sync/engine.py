@@ -339,43 +339,48 @@ class SyncEngine:
                 raise MeterNotFoundError(mid)
             matching_meter = existing
 
-        # Fetch richer nameplate and hierarchy from /meters/{mid}/__data.json
+        # Fetch richer nameplate and hierarchy from SvelteKit /meters/{mid}/__data.json
         try:
-            detail_resp = await client.get(f"/meters/{mid}/__data.json")
+            detail_resp = await client.get(f"/meters/{mid}/__data.json?x-sveltekit-invalidated=001")
             if detail_resp.status_code == 200:
-                payload = detail_resp.json()
-                nodes = payload.get("nodes", [])
-                if len(nodes) >= 3 and nodes[2] and nodes[2].get("type") == "data":
-                    data_list = nodes[2].get("data", [])
-                    if data_list and isinstance(data_list[0], dict):
-                        def resolve(idx: Any) -> Any:
-                            if isinstance(idx, int) and 0 <= idx < len(data_list):
-                                return data_list[idx]
-                            return idx
+                try:
+                    payload = detail_resp.json()
+                    nodes = payload.get("nodes", [])
+                    if len(nodes) >= 3 and nodes[2] and nodes[2].get("type") == "data":
+                        data_list = nodes[2].get("data", [])
+                        if data_list and isinstance(data_list[0], dict):
+                            def resolve(idx: Any) -> Any:
+                                if isinstance(idx, int) and 0 <= idx < len(data_list):
+                                    return data_list[idx]
+                                return idx
 
-                        root = data_list[0]
-                        detail_ref = resolve(root.get("detail"))
-                        if isinstance(detail_ref, dict) and "data" in detail_ref:
-                            item_indices = resolve(detail_ref["data"])
-                            if isinstance(item_indices, list):
-                                for i in item_indices:
-                                    item_obj = resolve(i)
-                                    if isinstance(item_obj, dict):
-                                        p_name = resolve(item_obj.get("parameterName"))
-                                        p_val = resolve(item_obj.get("parameterValue"))
-                                        if p_name == "Installation Type" and p_val:
-                                            matching_meter.installation_type = str(p_val)
+                            root = data_list[0]
+                            detail_ref = resolve(root.get("detail"))
+                            if isinstance(detail_ref, dict) and "data" in detail_ref:
+                                item_indices = resolve(detail_ref["data"])
+                                if isinstance(item_indices, list):
+                                    for i in item_indices:
+                                        item_obj = resolve(i)
+                                        if isinstance(item_obj, dict):
+                                            p_name = resolve(item_obj.get("parameterName"))
+                                            p_val = resolve(item_obj.get("parameterValue"))
+                                            if p_name == "Installation Type" and p_val:
+                                                matching_meter.installation_type = str(p_val)
 
-                        hier_ref = resolve(root.get("hierarchy"))
-                        if isinstance(hier_ref, dict):
-                            hier_dict = {k: resolve(v) for k, v in hier_ref.items()}
-                            matching_meter.raw_hierarchy = hier_dict
-                elif len(nodes) >= 3 and nodes[2] and nodes[2].get("status") == 404:
-                    raise MeterNotFoundError(mid)
+                            hier_ref = resolve(root.get("hierarchy"))
+                            if isinstance(hier_ref, dict):
+                                hier_dict = {k: resolve(v) for k, v in hier_ref.items()}
+                                matching_meter.raw_hierarchy = hier_dict
+                    elif len(nodes) >= 3 and nodes[2] and nodes[2].get("status") == 404:
+                        raise MeterNotFoundError(mid)
+                except MeterNotFoundError:
+                    raise
+                except Exception as parse_err:
+                    logger.warning("Failed to parse SvelteKit devalue payload for meter %s: %s", mid, parse_err)
         except MeterNotFoundError:
             raise
-        except Exception as e:
-            logger.debug("SvelteKit detail fetch skipped for %s: %s", mid, e)
+        except Exception as net_err:
+            logger.debug("SvelteKit detail endpoint unreachable for %s: %s", mid, net_err)
 
         # Fetch coordinates from /portal/meters/{mid}/geo if not present
         if matching_meter.location is None:
