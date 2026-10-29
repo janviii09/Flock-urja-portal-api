@@ -12,6 +12,8 @@ import logging
 import math
 import sqlite3
 import threading
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -80,13 +82,38 @@ class Store:
         with self._lock:
             self._conn.close()
 
+    @contextmanager
+    def transaction(self) -> Generator[None, None, None]:
+        """Atomic transaction context manager with lock and automatic rollback on failure."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
     # ── Meters ────────────────────────────────────────────────────────
 
     def upsert_meter(self, meter: Meter, provenance: Provenance) -> UpsertResult:
         """Idempotently insert or update a meter with change detection."""
         fetched_at_str = _dt_to_iso(provenance.fetched_at)
         quality_flags_json = json.dumps(meter.quality_flags)
-        hierarchy_json = meter.hierarchy_path.model_dump_json() if meter.hierarchy_path else None
+
+        # Serialize hierarchy data
+        if meter.raw_hierarchy:
+            hierarchy_json = json.dumps(meter.raw_hierarchy)
+        elif meter.hierarchy_path:
+            if hasattr(meter.hierarchy_path, "model_dump"):
+                hierarchy_json = json.dumps(meter.hierarchy_path.model_dump(mode="json"))
+            elif isinstance(meter.hierarchy_path, list):
+                hierarchy_json = json.dumps(meter.hierarchy_path)
+            else:
+                hierarchy_json = json.dumps(str(meter.hierarchy_path))
+        else:
+            hierarchy_json = None
+
         lat = meter.location.latitude if meter.location else None
         lon = meter.location.longitude if meter.location else None
         phase = meter.phase_type.value if meter.phase_type else None
@@ -96,7 +123,7 @@ class Store:
             cursor = self._conn.cursor()
             cursor.execute(
                 "SELECT serial_no, make, phase_type, installation_status, "
-                "installation_type, dt_code, latitude, longitude, payload_hash "
+                "installation_type, build, dt_code, latitude, longitude, payload_hash "
                 "FROM meters WHERE meter_id = ?",
                 (meter.meter_id,),
             )
@@ -107,10 +134,10 @@ class Store:
                     """
                     INSERT INTO meters (
                         meter_id, serial_no, make, phase_type, installation_status,
-                        installation_type, dt_code, latitude, longitude,
+                        installation_type, build, dt_code, latitude, longitude,
                         hierarchy_json, quality_flags, fetched_at,
                         source_endpoint, payload_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         meter.meter_id,
@@ -119,6 +146,7 @@ class Store:
                         phase,
                         status,
                         meter.installation_type,
+                        meter.build,
                         meter.dt_code,
                         lat,
                         lon,
@@ -138,6 +166,7 @@ class Store:
                 and existing["phase_type"] == phase
                 and existing["installation_status"] == status
                 and existing["installation_type"] == meter.installation_type
+                and existing["build"] == meter.build
                 and existing["dt_code"] == meter.dt_code
                 and existing["latitude"] == lat
                 and existing["longitude"] == lon
@@ -160,6 +189,7 @@ class Store:
                     phase_type = ?,
                     installation_status = ?,
                     installation_type = ?,
+                    build = ?,
                     dt_code = ?,
                     latitude = ?,
                     longitude = ?,
@@ -176,6 +206,7 @@ class Store:
                     phase,
                     status,
                     meter.installation_type,
+                    meter.build,
                     meter.dt_code,
                     lat,
                     lon,
@@ -378,9 +409,19 @@ class Store:
             loc = Location(latitude=row["latitude"], longitude=row["longitude"])
 
         hierarchy_path = None
+        raw_hierarchy = None
         if row["hierarchy_json"]:
             try:
-                hierarchy_path = HierarchyPath.model_validate_json(row["hierarchy_json"])
+                parsed_h = json.loads(row["hierarchy_json"])
+                if isinstance(parsed_h, dict):
+                    raw_hierarchy = parsed_h
+                    if any(k in parsed_h for k in ("zone", "circle", "division", "dt")):
+                        try:
+                            hierarchy_path = HierarchyPath(**parsed_h)
+                        except Exception:
+                            hierarchy_path = None
+                elif isinstance(parsed_h, list):
+                    hierarchy_path = parsed_h
             except Exception as e:
                 logger.warning(
                     "Failed to deserialize hierarchy_json for meter %s: %s",
@@ -393,6 +434,8 @@ class Store:
             InstallationStatus(row["installation_status"]) if row["installation_status"] else None
         )
         flags = json.loads(row["quality_flags"]) if row["quality_flags"] else []
+        cols = row.keys()
+        build = row["build"] if "build" in cols else None
 
         return Meter(
             meter_id=row["meter_id"],
@@ -401,17 +444,20 @@ class Store:
             phase_type=phase,
             installation_status=status,
             installation_type=row["installation_type"],
+            build=build,
             dt_code=row["dt_code"],
             location=loc,
             hierarchy_path=hierarchy_path,
+            raw_hierarchy=raw_hierarchy,
             quality_flags=flags,
         )
 
     # ── Readings ──────────────────────────────────────────────────────
 
     def upsert_reading(self, reading: Reading, provenance: Provenance) -> UpsertResult:
-        """Idempotently insert or update a consumption reading."""
+        """Idempotently insert or update a consumption reading keyed on (meter_id, raw_timestamp)."""
         ts_str = _dt_to_iso(reading.timestamp)
+        raw_ts = reading.raw_timestamp if reading.raw_timestamp else ts_str
         fetched_at_str = _dt_to_iso(provenance.fetched_at)
         quality_flags_json = json.dumps(reading.quality_flags)
 
@@ -419,8 +465,8 @@ class Store:
             cursor = self._conn.cursor()
             cursor.execute(
                 "SELECT kwh, kvah, voltage_r, payload_hash FROM readings "
-                "WHERE meter_id = ? AND timestamp = ?",
-                (reading.meter_id, ts_str),
+                "WHERE meter_id = ? AND raw_timestamp = ?",
+                (reading.meter_id, raw_ts),
             )
             existing = cursor.fetchone()
 
@@ -428,12 +474,13 @@ class Store:
                 cursor.execute(
                     """
                     INSERT INTO readings (
-                        meter_id, timestamp, kwh, kvah, voltage_r,
+                        meter_id, raw_timestamp, timestamp, kwh, kvah, voltage_r,
                         quality_flags, fetched_at, source_endpoint, payload_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         reading.meter_id,
+                        raw_ts,
                         ts_str,
                         reading.kwh,
                         reading.kvah,
@@ -455,14 +502,15 @@ class Store:
 
             if unchanged:
                 cursor.execute(
-                    "UPDATE readings SET fetched_at = ?, payload_hash = ? WHERE meter_id = ? AND timestamp = ?",
-                    (fetched_at_str, provenance.payload_hash, reading.meter_id, ts_str),
+                    "UPDATE readings SET fetched_at = ?, payload_hash = ? WHERE meter_id = ? AND raw_timestamp = ?",
+                    (fetched_at_str, provenance.payload_hash, reading.meter_id, raw_ts),
                 )
                 return UpsertResult.UNCHANGED
 
             cursor.execute(
                 """
                 UPDATE readings SET
+                    timestamp = ?,
                     kwh = ?,
                     kvah = ?,
                     voltage_r = ?,
@@ -470,9 +518,10 @@ class Store:
                     fetched_at = ?,
                     source_endpoint = ?,
                     payload_hash = ?
-                WHERE meter_id = ? AND timestamp = ?
+                WHERE meter_id = ? AND raw_timestamp = ?
                 """,
                 (
+                    ts_str,
                     reading.kwh,
                     reading.kvah,
                     reading.voltage_r,
@@ -481,7 +530,7 @@ class Store:
                     provenance.source_endpoint,
                     provenance.payload_hash,
                     reading.meter_id,
-                    ts_str,
+                    raw_ts,
                 ),
             )
             return UpsertResult.CHANGED
@@ -553,8 +602,10 @@ class Store:
 
     def _row_to_reading(self, row: sqlite3.Row) -> Reading:
         flags = json.loads(row["quality_flags"]) if row["quality_flags"] else []
+        raw_ts = row["raw_timestamp"] if "raw_timestamp" in row else row["timestamp"]
         return Reading(
             meter_id=row["meter_id"],
+            raw_timestamp=raw_ts,
             timestamp=_iso_to_dt(row["timestamp"]),
             kwh=row["kwh"],
             kvah=row["kvah"],
@@ -565,15 +616,16 @@ class Store:
     # ── Hierarchy Nodes ───────────────────────────────────────────────
 
     def upsert_hierarchy_node(self, node: HierarchyNode, provenance: Provenance) -> UpsertResult:
-        """Idempotently insert or update a hierarchy node with change detection."""
+        """Idempotently insert or update a hierarchy node keyed on node_path."""
         fetched_at_str = _dt_to_iso(provenance.fetched_at)
         quality_flags_json = json.dumps(node.quality_flags)
 
+        parent_val = node.parent_path or node.parent_code
         with self._lock:
             cursor = self._conn.cursor()
             cursor.execute(
-                "SELECT name, level, parent_code, payload_hash FROM hierarchy_nodes WHERE code = ?",
-                (node.code,),
+                "SELECT code, name, level, parent_path, payload_hash FROM hierarchy_nodes WHERE node_path = ?",
+                (node.node_path,),
             )
             existing = cursor.fetchone()
 
@@ -581,15 +633,16 @@ class Store:
                 cursor.execute(
                     """
                     INSERT INTO hierarchy_nodes (
-                        code, name, level, parent_code, quality_flags,
+                        node_path, code, name, level, parent_path, quality_flags,
                         fetched_at, source_endpoint, payload_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        node.node_path,
                         node.code,
                         node.name,
                         node.level.value,
-                        node.parent_code,
+                        parent_val,
                         quality_flags_json,
                         fetched_at_str,
                         provenance.source_endpoint,
@@ -599,9 +652,10 @@ class Store:
                 return UpsertResult.NEW
 
             unchanged = (
-                existing["name"] == node.name
+                existing["code"] == node.code
+                and existing["name"] == node.name
                 and existing["level"] == node.level.value
-                and existing["parent_code"] == node.parent_code
+                and existing["parent_path"] == parent_val
             )
 
             if unchanged:
@@ -610,24 +664,26 @@ class Store:
             cursor.execute(
                 """
                 UPDATE hierarchy_nodes SET
+                    code = ?,
                     name = ?,
                     level = ?,
-                    parent_code = ?,
+                    parent_path = ?,
                     quality_flags = ?,
                     fetched_at = ?,
                     source_endpoint = ?,
                     payload_hash = ?
-                WHERE code = ?
+                WHERE node_path = ?
                 """,
                 (
+                    node.code,
                     node.name,
                     node.level.value,
-                    node.parent_code,
+                    parent_val,
                     quality_flags_json,
                     fetched_at_str,
                     provenance.source_endpoint,
                     provenance.payload_hash,
-                    node.code,
+                    node.node_path,
                 ),
             )
             return UpsertResult.CHANGED
@@ -669,11 +725,14 @@ class Store:
 
         return new_cnt, changed_cnt, unchanged_cnt
 
-    def get_hierarchy_node(self, code: str) -> HierarchyNode | None:
-        """Fetch a single hierarchy node by code."""
+    def get_hierarchy_node(self, key: str) -> HierarchyNode | None:
+        """Fetch a single hierarchy node by node_path or code."""
         with self._lock:
             cursor = self._conn.cursor()
-            cursor.execute("SELECT * FROM hierarchy_nodes WHERE code = ?", (code.strip(),))
+            cursor.execute(
+                "SELECT * FROM hierarchy_nodes WHERE node_path = ? OR code = ?",
+                (key.strip(), key.strip()),
+            )
             row = cursor.fetchone()
             if row is None:
                 return None
@@ -682,21 +741,26 @@ class Store:
     def list_hierarchy_nodes(
         self,
         level: HierarchyLevel | None = None,
+        parent_path: str | None = None,
         parent_code: str | None = None,
     ) -> list[HierarchyNode]:
-        """Query hierarchy nodes filtered by level or parent code."""
+        """Query hierarchy nodes filtered by level or parent path/code."""
         conditions = []
         params: list[Any] = []
 
         if level is not None:
             conditions.append("level = ?")
             params.append(level.value)
-        if parent_code is not None:
-            conditions.append("parent_code = ?")
-            params.append(parent_code.strip())
+
+        target_parent = parent_path or parent_code
+        if target_parent is not None:
+            conditions.append(
+                "(parent_path = ? OR parent_path LIKE ? || '/%' OR parent_path IN (SELECT node_path FROM hierarchy_nodes WHERE code = ?))"
+            )
+            params.extend([target_parent.strip(), target_parent.strip(), target_parent.strip()])
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        query = f"SELECT * FROM hierarchy_nodes {where} ORDER BY code ASC"
+        query = f"SELECT * FROM hierarchy_nodes {where} ORDER BY node_path ASC"
 
         with self._lock:
             cursor = self._conn.cursor()
@@ -707,53 +771,65 @@ class Store:
         """Fetch all hierarchy nodes in the store."""
         with self._lock:
             cursor = self._conn.cursor()
-            cursor.execute("SELECT * FROM hierarchy_nodes ORDER BY code ASC")
+            cursor.execute("SELECT * FROM hierarchy_nodes ORDER BY node_path ASC")
             return [self._row_to_node(r) for r in cursor.fetchall()]
 
-    def get_node_children(self, parent_code: str) -> list[HierarchyNode]:
-        """Fetch immediate direct children of a hierarchy node."""
-        norm = parent_code.strip().upper()
+    def get_node_children(self, parent_identifier: str) -> list[HierarchyNode]:
+        """Fetch immediate direct children of a hierarchy node by parent path or code."""
+        norm = parent_identifier.strip()
         with self._lock:
             cursor = self._conn.cursor()
             cursor.execute(
-                "SELECT * FROM hierarchy_nodes WHERE UPPER(TRIM(parent_code)) = ? ORDER BY code ASC",
-                (norm,),
+                """
+                SELECT * FROM hierarchy_nodes
+                WHERE parent_path = ?
+                   OR parent_path IN (SELECT node_path FROM hierarchy_nodes WHERE code = ?)
+                ORDER BY node_path ASC
+                """,
+                (norm, norm.upper()),
             )
             return [self._row_to_node(r) for r in cursor.fetchall()]
 
-    def get_node_subtree_cte(self, root_code: str) -> list[HierarchyNode]:
-        """Fetch all descendants of a node using an iterative recursive CTE with cycle protection.
-
-        Includes the root node itself as the first element if found.
-        """
-        norm = root_code.strip().upper()
+    def get_node_subtree_cte(self, root_identifier: str) -> list[HierarchyNode]:
+        """Fetch all descendants of a node using recursive CTE on parent_path with cycle protection."""
+        norm = root_identifier.strip()
         query = """
-        WITH RECURSIVE subtree(code, name, level, parent_code, quality_flags, depth) AS (
-            SELECT code, name, level, parent_code, quality_flags, 0 AS depth
+        WITH RECURSIVE subtree(node_path, code, name, level, parent_path, quality_flags, depth) AS (
+            SELECT node_path, code, name, level, parent_path, quality_flags, 0 AS depth
             FROM hierarchy_nodes
-            WHERE UPPER(TRIM(code)) = ?
+            WHERE node_path = ? OR UPPER(TRIM(code)) = ?
             UNION ALL
-            SELECT h.code, h.name, h.level, h.parent_code, h.quality_flags, s.depth + 1
+            SELECT h.node_path, h.code, h.name, h.level, h.parent_path, h.quality_flags, s.depth + 1
             FROM hierarchy_nodes h
-            JOIN subtree s ON UPPER(TRIM(h.parent_code)) = UPPER(TRIM(s.code))
+            JOIN subtree s ON h.parent_path = s.node_path
             WHERE s.depth < 20
         )
-        SELECT code, name, level, parent_code, quality_flags
+        SELECT node_path, code, name, level, parent_path, quality_flags
         FROM subtree
-        ORDER BY depth ASC, code ASC;
+        ORDER BY depth ASC, node_path ASC;
         """
         with self._lock:
             cursor = self._conn.cursor()
-            cursor.execute(query, (norm,))
+            cursor.execute(query, (norm, norm.upper()))
             return [self._row_to_node(r) for r in cursor.fetchall()]
 
     def _row_to_node(self, row: sqlite3.Row) -> HierarchyNode:
         flags = json.loads(row["quality_flags"]) if row["quality_flags"] else []
+        cols = row.keys()
+        node_path = row["node_path"] if "node_path" in cols else (row["code"] or "")
+        parent_path = (
+            row["parent_path"]
+            if "parent_path" in cols
+            else (row["parent_code"] if "parent_code" in cols else None)
+        )
+        parent_code = parent_path.split("/")[-1] if parent_path else None
         return HierarchyNode(
+            node_path=node_path,
             code=row["code"],
             name=row["name"],
             level=HierarchyLevel(row["level"]),
-            parent_code=row["parent_code"],
+            parent_path=parent_path,
+            parent_code=parent_code,
             quality_flags=flags,
         )
 

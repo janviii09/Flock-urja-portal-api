@@ -1,25 +1,28 @@
 """Synchronization engine — orchestrates portal scraping, adapter parsing, and store ingestion.
 
 Supports:
-- Paginated sync of `/meters` (or bulk path if available)
-- Detail sync of `/meters/{meter_id}` (nameplate, 7-level hierarchy, consumption readings)
-- Transformers sync from `/transformers`
-- Change detection and idempotent upserts
-- Resilient isolation: per-meter/per-page failures never corrupt existing data
+- Verified bulk export sync via `/portal/export` (signed with dynamic HMAC-SHA256 from `/portal/keys`)
+- Paginated search sync via `/portal/meters/search`
+- Energy telemetry sync via `/portal/meters/{id}/energy` (bounded concurrency, default 4)
+- Atomic SQLite transactions (`with self.store.transaction(): ...`)
+- Idempotent upserts with change detection (NEW, CHANGED, UNCHANGED)
 - Audit logging via ``sync_runs`` table
+- Zero-deletions invariant: missing records are never dropped
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 from urja.adapters import (
-    parse_meter_detail,
-    parse_meters_list,
-    parse_pagination,
-    parse_transformers,
+    parse_dts_payload,
+    parse_energy_payload,
+    parse_export_payload,
+    parse_search_payload,
 )
 from urja.client.exceptions import (
     MeterNotFoundError,
@@ -28,7 +31,10 @@ from urja.client.exceptions import (
 )
 from urja.client.portal import PortalClient
 from urja.domain.models import (
+    Location,
+    Meter,
     Provenance,
+    Reading,
     SyncRun,
     SyncStatus,
     UpsertResult,
@@ -49,30 +55,196 @@ class SyncEngine:
     def __init__(self, store: Store) -> None:
         self.store = store
 
-    async def sync_meters_list(
+    # ── Bulk Export Sync ──────────────────────────────────────────────
+
+    async def sync_bulk_export(
+        self,
+        client: PortalClient,
+    ) -> SyncRun:
+        """Fetch and ingest full network metadata from GET /portal/export?page=1.
+
+        Uses ephemeral HMAC-SHA256 signing via client.get_export().
+        Executes in an atomic SQLite transaction — if parsing or database insertion fails,
+        the entire batch is rolled back, leaving existing data untouched.
+        """
+        run = self.store.create_sync_run(resource="bulk_export")
+        items_new = 0
+        items_changed = 0
+        items_unchanged = 0
+        items_failed = 0
+
+        endpoint = "/portal/export?page=1"
+        try:
+            resp = await client.get_export(page=1)
+            payload_hash = compute_payload_hash(resp.text)
+            fetched_at = datetime.now(timezone.utc)
+            provenance = Provenance(
+                fetched_at=fetched_at,
+                source_endpoint=endpoint,
+                payload_hash=payload_hash,
+            )
+
+            data: dict[str, Any] = resp.json()
+            meters, hierarchy_nodes, _total = parse_export_payload(data)
+
+            # Atomic transaction for the entire export ingestion
+            with self.store.transaction():
+                for m in meters:
+                    res = self.store.upsert_meter(m, provenance)
+                    if res == UpsertResult.NEW:
+                        items_new += 1
+                    elif res == UpsertResult.CHANGED:
+                        items_changed += 1
+                    else:
+                        items_unchanged += 1
+
+                for n in hierarchy_nodes:
+                    self.store.upsert_hierarchy_node(n, provenance)
+
+            finished_run = self.store.finish_sync_run(
+                run_id=run.run_id,
+                status=SyncStatus.SUCCESS,
+                items_new=items_new,
+                items_changed=items_changed,
+                items_unchanged=items_unchanged,
+                items_failed=items_failed,
+            )
+            return finished_run or run
+
+        except Exception as e:
+            logger.exception("Bulk export synchronization failed: %s", e)
+            finished_run = self.store.finish_sync_run(
+                run_id=run.run_id,
+                status=SyncStatus.FAILED,
+                items_new=items_new,
+                items_changed=items_changed,
+                items_unchanged=items_unchanged,
+                items_failed=items_failed + 1,
+                error_message=str(e),
+            )
+            return finished_run or run
+
+    # ── Energy Telemetry Sync ─────────────────────────────────────────
+
+    async def sync_meter_energy(
+        self,
+        client: PortalClient,
+        meter_id: str,
+    ) -> tuple[int, int, int]:
+        """Fetch and ingest energy readings for a single meter.
+
+        Runs in an isolated per-meter transaction.
+        Returns (readings_new, readings_changed, readings_unchanged).
+        """
+        endpoint = f"/portal/meters/{meter_id}/energy"
+        resp = await client.get(endpoint)
+        if resp.status_code == 404:
+            raise MeterNotFoundError(meter_id)
+        if resp.status_code >= 400:
+            raise PortalError(f"HTTP {resp.status_code} fetching energy for {meter_id}")
+
+        payload_hash = compute_payload_hash(resp.text)
+        fetched_at = datetime.now(timezone.utc)
+        provenance = Provenance(
+            fetched_at=fetched_at,
+            source_endpoint=endpoint,
+            payload_hash=payload_hash,
+        )
+
+        readings: list[Reading] = parse_energy_payload(resp.json(), meter_id=meter_id)
+        new_cnt = 0
+        changed_cnt = 0
+        unchanged_cnt = 0
+
+        with self.store.transaction():
+            for r in readings:
+                res = self.store.upsert_reading(r, provenance)
+                if res == UpsertResult.NEW:
+                    new_cnt += 1
+                elif res == UpsertResult.CHANGED:
+                    changed_cnt += 1
+                else:
+                    unchanged_cnt += 1
+
+        return new_cnt, changed_cnt, unchanged_cnt
+
+    async def sync_meters_energy(
+        self,
+        client: PortalClient,
+        meter_ids: list[str] | None = None,
+        concurrency: int = 4,
+    ) -> SyncRun:
+        """Batch synchronize energy readings for meters with bounded concurrency.
+
+        Args:
+            client: Authenticated portal client.
+            meter_ids: Specific list of meter IDs, or None to query all known meters.
+            concurrency: Maximum parallel requests to legacy portal (default: 4).
+        """
+        run = self.store.create_sync_run(resource="meter_energy")
+        items_new = 0
+        items_changed = 0
+        items_unchanged = 0
+        items_failed = 0
+
+        if meter_ids is None:
+            all_meters = self.store.list_all_meters()
+            meter_ids = [m.meter_id for m in all_meters]
+
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _worker(mid: str) -> tuple[int, int, int] | None:
+            async with sem:
+                try:
+                    return await self.sync_meter_energy(client, mid)
+                except Exception as e:
+                    logger.error("Failed to sync energy for meter %s: %s", mid, e)
+                    return None
+
+        results = await asyncio.gather(*[_worker(mid) for mid in meter_ids])
+
+        for res in results:
+            if res is None:
+                items_failed += 1
+            else:
+                n, c, u = res
+                items_new += n
+                items_changed += c
+                items_unchanged += u
+
+        status = SyncStatus.PARTIAL_FAILURE if items_failed > 0 else SyncStatus.SUCCESS
+        finished_run = self.store.finish_sync_run(
+            run_id=run.run_id,
+            status=status,
+            items_new=items_new,
+            items_changed=items_changed,
+            items_unchanged=items_unchanged,
+            items_failed=items_failed,
+        )
+        return finished_run or run
+
+    # ── Search & Paginated Sync ───────────────────────────────────────
+
+    async def sync_meters_search(
         self,
         client: PortalClient,
         max_pages: int | None = None,
     ) -> SyncRun:
-        """Paginate through /meters and synchronize all meter list summaries.
-
-        Uses the pagination observed on portal (?page=1, ?page=2, ... 20 per page).
-        Continues until all pages are retrieved or ``max_pages`` is reached.
-        """
-        run = self.store.create_sync_run(resource="meters_list")
+        """Synchronize meters from paginated GET /portal/meters/search?q=&page=N."""
+        run = self.store.create_sync_run(resource="meters_search")
         items_new = 0
         items_changed = 0
         items_unchanged = 0
         items_failed = 0
         current_page = 1
-        total_pages = 1
+        page_size = 20
 
         try:
             while True:
                 if max_pages is not None and current_page > max_pages:
                     break
 
-                endpoint = f"/meters?page={current_page}"
+                endpoint = f"/portal/meters/search?q=&page={current_page}"
                 try:
                     resp = await client.get(endpoint)
                     payload_hash = compute_payload_hash(resp.text)
@@ -83,13 +255,12 @@ class SyncEngine:
                         payload_hash=payload_hash,
                     )
 
-                    meters = parse_meters_list(resp.text)
-                    _, page_total = parse_pagination(resp.text)
-                    if page_total > total_pages:
-                        total_pages = page_total
+                    meters, total, _page, page_size = parse_search_payload(resp.json())
+                    if not meters:
+                        break
 
-                    for meter in meters:
-                        try:
+                    with self.store.transaction():
+                        for meter in meters:
                             res = self.store.upsert_meter(meter, provenance)
                             if res == UpsertResult.NEW:
                                 items_new += 1
@@ -97,17 +268,15 @@ class SyncEngine:
                                 items_changed += 1
                             else:
                                 items_unchanged += 1
-                        except Exception as e:
-                            logger.error("Failed to upsert meter %s: %s", meter.meter_id, e)
-                            items_failed += 1
 
-                except (PortalError, PortalShapeError, Exception) as e:
-                    logger.error("Failed to fetch/parse page %d: %s", current_page, e)
+                    if current_page * page_size >= total:
+                        break
+                    current_page += 1
+
+                except Exception as e:
+                    logger.error("Failed to sync search page %d: %s", current_page, e)
                     items_failed += 1
-
-                if current_page >= total_pages:
                     break
-                current_page += 1
 
             status = SyncStatus.PARTIAL_FAILURE if items_failed > 0 else SyncStatus.SUCCESS
             finished_run = self.store.finish_sync_run(
@@ -121,7 +290,7 @@ class SyncEngine:
             return finished_run or run
 
         except Exception as e:
-            logger.exception("Critical error during meters list sync: %s", e)
+            logger.exception("Critical error during search sync: %s", e)
             finished_run = self.store.finish_sync_run(
                 run_id=run.run_id,
                 status=SyncStatus.FAILED,
@@ -133,68 +302,92 @@ class SyncEngine:
             )
             return finished_run or run
 
+    # ── Single-Meter On-Demand Sync ──────────────────────────────────
+
     async def sync_meter_detail(
         self,
         client: PortalClient,
         meter_id: str,
     ) -> tuple[UpsertResult, int, int]:
-        """Fetch and ingest full detail for a single meter.
+        """Fetch and ingest detail for a single meter using verified JSON endpoints.
 
-        Ingests nameplate, coordinates, 7-level hierarchy path, and consumption readings.
-        Runs in an atomic per-meter transaction — partial failure never corrupts existing data.
-        Returns (meter_upsert_result, readings_count, hierarchy_nodes_count).
+        Coordinates:
+        - GET /portal/meters/search?q={mid} for nameplate specs
+        - GET /portal/meters/{mid}/geo for coordinates
+        - GET /portal/meters/{mid}/energy for consumption time-series
         """
-        endpoint = f"/meters/{meter_id}"
-        resp = await client.get(endpoint)
-        if resp.status_code == 404:
-            raise MeterNotFoundError(meter_id)
-        if resp.status_code >= 400:
-            raise PortalError(f"HTTP {resp.status_code} fetching {endpoint}")
+        mid = meter_id.strip().upper()
+        search_endpoint = f"/portal/meters/search?q={mid}"
+        s_resp = await client.get(search_endpoint)
+        if s_resp.status_code >= 400:
+            raise PortalError(f"HTTP {s_resp.status_code} searching for meter {mid}")
 
-        payload_hash = compute_payload_hash(resp.text)
-        fetched_at = datetime.now(timezone.utc)
+        try:
+            meters, _, _, _ = parse_search_payload(s_resp.json())
+        except Exception as e:
+            raise PortalShapeError(f"Failed to parse search payload for {mid}: {e}") from e
+
+        matching_meter: Meter | None = None
+        for m in meters:
+            if m.meter_id.upper() == mid:
+                matching_meter = m
+                break
+
+        if matching_meter is None:
+            existing = self.store.get_meter(mid)
+            if existing is None:
+                raise MeterNotFoundError(mid)
+            matching_meter = existing
+
+        # Fetch coordinates from /portal/meters/{mid}/geo if not present
+        if matching_meter.location is None:
+            try:
+                geo_resp = await client.get(f"/portal/meters/{mid}/geo")
+                if geo_resp.status_code == 200:
+                    geo_data = geo_resp.json()
+                    if isinstance(geo_data, dict) and "data" in geo_data:
+                        coords = geo_data["data"]
+                        lat_val = coords.get("latitude")
+                        lng_val = coords.get("longitude")
+                        if lat_val is not None and lng_val is not None:
+                            try:
+                                lat = float(lat_val)
+                                lng = float(lng_val)
+                                q_flags = []
+                                if lat == 0.0 and lng == 0.0:
+                                    q_flags.append("null_island")
+                                matching_meter.location = Location(
+                                    latitude=lat,
+                                    longitude=lng,
+                                    quality_flags=q_flags,
+                                )
+                            except (ValueError, TypeError):
+                                pass
+            except Exception as e:
+                logger.debug("Geo fetch skipped for %s: %s", mid, e)
+
+        # Fetch energy telemetry from /portal/meters/{mid}/energy
+        readings: list[Reading] = []
+        try:
+            energy_resp = await client.get(f"/portal/meters/{mid}/energy")
+            if energy_resp.status_code == 200:
+                readings = parse_energy_payload(energy_resp.json(), meter_id=mid)
+        except Exception as e:
+            logger.debug("Energy fetch skipped for %s: %s", mid, e)
+
+        payload_hash = compute_payload_hash(s_resp.text)
         provenance = Provenance(
-            fetched_at=fetched_at,
-            source_endpoint=endpoint,
+            fetched_at=datetime.now(timezone.utc),
+            source_endpoint=search_endpoint,
             payload_hash=payload_hash,
         )
 
-        detail = parse_meter_detail(resp.text, meter_id=meter_id)
+        with self.store.transaction():
+            meter_res = self.store.upsert_meter(matching_meter, provenance)
+            for reading in readings:
+                self.store.upsert_reading(reading, provenance)
 
-        # Isolated per-meter transaction
-        with self.store._lock:
-            self.store._conn.execute("BEGIN IMMEDIATE")
-            try:
-                # 1. Upsert meter with coordinates and hierarchy JSON
-                meter_res = self.store.upsert_meter(detail.meter, provenance)
-
-                # 2. Upsert hierarchy nodes
-                nodes_upserted = 0
-                if detail.meter.hierarchy_path:
-                    nodes = [
-                        detail.meter.hierarchy_path.zone,
-                        detail.meter.hierarchy_path.circle,
-                        detail.meter.hierarchy_path.division,
-                        detail.meter.hierarchy_path.subdivision,
-                        detail.meter.hierarchy_path.substation,
-                        detail.meter.hierarchy_path.feeder,
-                        detail.meter.hierarchy_path.dt,
-                    ]
-                    for node in nodes:
-                        if node is not None:
-                            self.store.upsert_hierarchy_node(node, provenance)
-                            nodes_upserted += 1
-
-                # 3. Upsert readings
-                for reading in detail.readings:
-                    self.store.upsert_reading(reading, provenance)
-
-                self.store._conn.execute("COMMIT")
-                return meter_res, len(detail.readings), nodes_upserted
-
-            except Exception:
-                self.store._conn.execute("ROLLBACK")
-                raise
+        return meter_res, len(readings), 0
 
     async def sync_meter_details(
         self,
@@ -232,102 +425,137 @@ class SyncEngine:
         )
         return finished_run or run
 
+    # ── Transformers Ingestion ───────────────────────────────────────
+
     async def sync_transformers(
         self,
         client: PortalClient,
+        max_pages: int | None = None,
     ) -> SyncRun:
-        """Synchronize transformers list from /transformers."""
+        """Synchronize transformers from paginated JSON endpoint /portal/dts?page=N."""
         run = self.store.create_sync_run(resource="transformers")
         items_new = 0
         items_changed = 0
         items_unchanged = 0
         items_failed = 0
+        current_page = 1
+        page_size = 20
 
         try:
-            endpoint = "/transformers"
-            resp = await client.get(endpoint)
-            payload_hash = compute_payload_hash(resp.text)
-            fetched_at = datetime.now(timezone.utc)
-            provenance = Provenance(
-                fetched_at=fetched_at,
-                source_endpoint=endpoint,
-                payload_hash=payload_hash,
-            )
+            while True:
+                if max_pages is not None and current_page > max_pages:
+                    break
 
-            transformers = parse_transformers(resp.text)
-            for t in transformers:
-                try:
-                    res = self.store.upsert_transformer(t, provenance)
-                    if res == UpsertResult.NEW:
-                        items_new += 1
-                    elif res == UpsertResult.CHANGED:
-                        items_changed += 1
-                    else:
-                        items_unchanged += 1
-                except Exception as e:
-                    logger.error("Failed to upsert transformer %s: %s", t.code, e)
-                    items_failed += 1
+                endpoint = f"/portal/dts?page={current_page}"
+                resp = await client.get(endpoint)
+                if resp.status_code != 200:
+                    if resp.status_code != 404:
+                        items_failed += 1
+                    break
 
-            status = SyncStatus.PARTIAL_FAILURE if items_failed > 0 else SyncStatus.SUCCESS
-            finished_run = self.store.finish_sync_run(
-                run_id=run.run_id,
-                status=status,
-                items_new=items_new,
-                items_changed=items_changed,
-                items_unchanged=items_unchanged,
-                items_failed=items_failed,
-            )
-            return finished_run or run
+                payload_hash = compute_payload_hash(resp.text)
+                provenance = Provenance(
+                    fetched_at=datetime.now(timezone.utc),
+                    source_endpoint=endpoint,
+                    payload_hash=payload_hash,
+                )
+
+                transformers, total, _page, page_size = parse_dts_payload(resp.json())
+                if not transformers:
+                    break
+
+                with self.store.transaction():
+                    for t in transformers:
+                        res = self.store.upsert_transformer(t, provenance)
+                        if res == UpsertResult.NEW:
+                            items_new += 1
+                        elif res == UpsertResult.CHANGED:
+                            items_changed += 1
+                        else:
+                            items_unchanged += 1
+
+                if current_page * page_size >= total:
+                    break
+                current_page += 1
 
         except Exception as e:
-            logger.exception("Failed to sync transformers: %s", e)
-            finished_run = self.store.finish_sync_run(
-                run_id=run.run_id,
-                status=SyncStatus.FAILED,
-                items_new=items_new,
-                items_changed=items_changed,
-                items_unchanged=items_unchanged,
-                items_failed=items_failed + 1,
-                error_message=str(e),
-            )
-            return finished_run or run
+            logger.error("Failed to sync transformers: %s", e)
+            items_failed += 1
+
+        status = SyncStatus.PARTIAL_FAILURE if items_failed > 0 else SyncStatus.SUCCESS
+        finished_run = self.store.finish_sync_run(
+            run_id=run.run_id,
+            status=status,
+            items_new=items_new,
+            items_changed=items_changed,
+            items_unchanged=items_unchanged,
+            items_failed=items_failed,
+        )
+        return finished_run or run
+
+    # ── Master Orchestration ─────────────────────────────────────────
 
     async def sync_all(
         self,
         client: PortalClient,
         max_pages: int | None = None,
-        sync_details: bool = False,
+        sync_energy: bool = True,
+        energy_concurrency: int = 4,
+        energy_limit: int | None = None,
     ) -> SyncRun:
-        """Full synchronization: transformers, meters list, and optionally meter details."""
+        """Full synchronization prioritizing bulk export, transformers, and energy telemetry."""
         overall_run = self.store.create_sync_run(resource="all")
         tot_new = 0
         tot_changed = 0
         tot_unchanged = 0
         tot_failed = 0
 
-        # 1. Transformers
-        t_run = await self.sync_transformers(client)
-        tot_new += t_run.items_new
-        tot_changed += t_run.items_changed
-        tot_unchanged += t_run.items_unchanged
-        tot_failed += t_run.items_failed
+        # 1. Attempt Bulk Export
+        export_success = False
+        try:
+            export_run = await self.sync_bulk_export(client)
+            tot_new += export_run.items_new
+            tot_changed += export_run.items_changed
+            tot_unchanged += export_run.items_unchanged
+            tot_failed += export_run.items_failed
+            if export_run.status in (SyncStatus.SUCCESS, SyncStatus.PARTIAL_FAILURE):
+                export_success = True
+        except Exception as e:
+            logger.warning("Bulk export failed, falling back to search: %s", e)
 
-        # 2. Meters list
-        m_run = await self.sync_meters_list(client, max_pages=max_pages)
-        tot_new += m_run.items_new
-        tot_changed += m_run.items_changed
-        tot_unchanged += m_run.items_unchanged
-        tot_failed += m_run.items_failed
+        # 2. Fallback to Search if Bulk Export failed
+        if not export_success:
+            m_run = await self.sync_meters_search(client, max_pages=max_pages)
+            tot_new += m_run.items_new
+            tot_changed += m_run.items_changed
+            tot_unchanged += m_run.items_unchanged
+            tot_failed += m_run.items_failed
 
-        # 3. Meter details (if requested)
-        if sync_details:
-            all_meters = self.store.list_meters(limit=1000)
-            m_ids = [m.meter_id for m in all_meters]
-            d_run = await self.sync_meter_details(client, m_ids)
-            tot_new += d_run.items_new
-            tot_changed += d_run.items_changed
-            tot_unchanged += d_run.items_unchanged
-            tot_failed += d_run.items_failed
+        # 3. Synchronize Transformers (/portal/dts?page=N)
+        try:
+            t_run = await self.sync_transformers(client)
+            tot_new += t_run.items_new
+            tot_changed += t_run.items_changed
+            tot_unchanged += t_run.items_unchanged
+            tot_failed += t_run.items_failed
+        except Exception as e:
+            logger.warning("Transformers sync failed: %s", e)
+
+        # 4. Synchronize Energy Telemetry
+        if sync_energy:
+            all_meters = self.store.list_all_meters()
+            meter_ids = [m.meter_id for m in all_meters]
+            if energy_limit is not None:
+                meter_ids = meter_ids[:energy_limit]
+
+            if meter_ids:
+                e_run = await self.sync_meters_energy(
+                    client, meter_ids=meter_ids, concurrency=energy_concurrency
+                )
+                tot_new += e_run.items_new
+                tot_changed += e_run.items_changed
+                tot_unchanged += e_run.items_unchanged
+                tot_failed += e_run.items_failed
 
         status = SyncStatus.PARTIAL_FAILURE if tot_failed > 0 else SyncStatus.SUCCESS
         finished_run = self.store.finish_sync_run(

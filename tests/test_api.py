@@ -19,10 +19,6 @@ import httpx
 import pytest
 from httpx import ASGITransport
 
-from tests.fixtures.portal_pages import (
-    METER_DETAIL_HTML,
-    METERS_LIST_PAGE_HTML,
-)
 from urja.api.app import app
 from urja.api.deps import get_client, get_freshness, get_store
 from urja.client.portal import PortalClient
@@ -32,7 +28,7 @@ from urja.store.repository import Store
 
 @pytest.fixture
 def mock_portal_transport():
-    """Default mock transport returning login OK, meters list, and meter detail."""
+    """Default mock transport returning verified portal JSON endpoints."""
     call_counts: dict[str, int] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -41,13 +37,105 @@ def mock_portal_transport():
 
         if path == "/login":
             return httpx.Response(200, text="OK")
-        if path == "/meters":
-            return httpx.Response(200, text=METERS_LIST_PAGE_HTML)
-        if path == "/meters/J100000":
-            return httpx.Response(200, text=METER_DETAIL_HTML)
-        if path == "/meters/J100001":
-            html1 = METER_DETAIL_HTML.replace("J100000", "J100001").replace("SE33962", "GE84132")
-            return httpx.Response(200, text=html1)
+        if path == "/portal/keys":
+            return httpx.Response(200, json={"data": {"signingSecret": "test-secret-123"}})
+        if path == "/portal/export":
+            export_data = [
+                {
+                    "meterId": "J100000",
+                    "serialNo": "SE33962",
+                    "make": "HPL",
+                    "phaseType": "single",
+                    "installStatus": "Installed",
+                    "installType": "Whole Current",
+                    "build": "legacy",
+                    "dtCode": "DT-001",
+                    "hierarchy": {
+                        "zone": {"name": "Jaipur Zone 1", "code": "Z-01"},
+                        "circle": {"name": "Circle 1", "code": "C-01"},
+                        "division": {"name": "Division 1", "code": "D-01"},
+                        "subdivision": {"name": "Subdivision 1", "code": "SD-01"},
+                        "substation": {"name": "Substation 1", "code": "S-01"},
+                        "feeder": {"name": "Feeder 1", "code": "F-01"},
+                        "dt": {"name": "DT 1", "code": "DT-001"},
+                    },
+                    "geo": {"lat": 26.94, "lng": 75.81},
+                },
+                {
+                    "meterId": "J100001",
+                    "serialNo": "GE84132",
+                    "make": "L&T",
+                    "phaseType": "single",
+                    "installStatus": "Installed",
+                    "installType": "Whole Current",
+                    "build": "legacy",
+                    "dtCode": "DT-002",
+                    "hierarchy": {
+                        "zone": {"name": "Jaipur Zone 1", "code": "Z-01"},
+                        "circle": {"name": "Circle 1", "code": "C-01"},
+                        "division": {"name": "Division 1", "code": "D-01"},
+                        "subdivision": {"name": "Subdivision 1", "code": "SD-01"},
+                        "substation": {"name": "Substation 1", "code": "S-01"},
+                        "feeder": {"name": "Feeder 1", "code": "F-01"},
+                        "dt": {"name": "DT 2", "code": "DT-002"},
+                    },
+                    "geo": {"lat": 26.95, "lng": 75.82},
+                },
+            ]
+            return httpx.Response(200, json={"data": export_data, "total": len(export_data)})
+        if path == "/portal/meters/search":
+            q = request.url.params.get("q", "").upper()
+            if q == "J100000" or not q:
+                items = [
+                    {
+                        "meterId": "J100000",
+                        "serialNo": "SE33962",
+                        "make": "HPL",
+                        "phaseType": "single",
+                        "installStatus": "Installed",
+                        "dtCode": "DT-001",
+                    }
+                ]
+            elif q == "J100001":
+                items = [
+                    {
+                        "meterId": "J100001",
+                        "serialNo": "GE84132",
+                        "make": "L&T",
+                        "phaseType": "single",
+                        "installStatus": "Installed",
+                        "dtCode": "DT-002",
+                    }
+                ]
+            else:
+                items = []
+            return httpx.Response(
+                200, json={"data": items, "total": len(items), "page": 1, "pageSize": 20}
+            )
+        if path.startswith("/portal/meters/") and path.endswith("/geo"):
+            return httpx.Response(200, json={"data": {"latitude": "26.94", "longitude": "75.81"}})
+        if path.startswith("/portal/meters/") and path.endswith("/energy"):
+            readings = [
+                {
+                    "timestamp": "23/06/2026 23:30",
+                    "kwh": 48439.58,
+                    "kvah": 51230.12,
+                    "voltR": 238.4,
+                },
+                {
+                    "timestamp": "23/06/2026 23:00",
+                    "kwh": 48438.12,
+                    "kvah": 51228.45,
+                    "voltR": 239.1,
+                },
+            ]
+            return httpx.Response(200, json={"data": readings})
+        if path == "/portal/dts":
+            dts = [
+                {"code": "DT-001", "name": "DT 1", "feederCode": "F-001", "capacityKva": 100},
+                {"code": "DT-002", "name": "DT 2", "feederCode": "F-001", "capacityKva": 150},
+            ]
+            return httpx.Response(200, json={"data": dts, "total": 2, "page": 1, "pageSize": 20})
         return httpx.Response(404, text="Not Found")
 
     transport = httpx.MockTransport(handler)
@@ -98,8 +186,8 @@ class TestSingleFlight:
             assert data_first["meter_id"] == "J100000"
             assert all(r.json()["data"]["meter_id"] == "J100000" for r in responses)
 
-            # Exactly ONE request was made to upstream /meters/J100000
-            assert transport.call_counts.get("/meters/J100000") == 1
+            # Exactly ONE search request was made to upstream /portal/meters/search
+            assert transport.call_counts.get("/portal/meters/search") == 1
 
 
 class TestTTLBoundaryAndStaleWhileRevalidate:
@@ -134,7 +222,7 @@ class TestTTLBoundaryAndStaleWhileRevalidate:
             assert body["meta"]["age_seconds"] >= 600
 
             # No portal call occurred
-            assert transport.call_counts.get("/meters/J100000", 0) == 0
+            assert transport.call_counts.get("/portal/meters/search", 0) == 0
 
     @pytest.mark.asyncio
     async def test_stale_item_revalidated_via_portal(self, test_setup):
@@ -158,7 +246,7 @@ class TestTTLBoundaryAndStaleWhileRevalidate:
             # Portal updated data
             assert body["meta"]["source"] == "portal"
             assert body["meta"]["stale"] is False
-            assert transport.call_counts.get("/meters/J100000") == 1
+            assert transport.call_counts.get("/portal/meters/search") == 1
 
     @pytest.mark.asyncio
     async def test_stale_while_revalidate_fallback_when_portal_down(self, test_setup):

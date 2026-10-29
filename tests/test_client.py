@@ -10,7 +10,6 @@ import pytest
 from tests.fixtures.portal_pages import (
     LOGIN_FAILED_HTML,
     LOGIN_PAGE_HTML,
-    METERS_LIST_PAGE_HTML,
 )
 from urja.client import (
     AuthenticationError,
@@ -31,7 +30,7 @@ async def test_successful_login_and_get():
         if request.url.path == "/login" and request.method == "POST":
             return httpx.Response(200, headers={"Set-Cookie": "session=xyz123"}, text="OK")
         if request.url.path == "/meters" and request.method == "GET":
-            return httpx.Response(200, text=METERS_LIST_PAGE_HTML)
+            return httpx.Response(200, json={"data": [{"meterId": "J100000"}]})
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
@@ -65,7 +64,7 @@ async def test_expired_session_triggers_relogin_and_retry_once():
                 # Simulates expired session via 401
                 return httpx.Response(401, text="Unauthorized")
             # After re-login, succeeds
-            return httpx.Response(200, text=METERS_LIST_PAGE_HTML)
+            return httpx.Response(200, json={"data": [{"meterId": "J100000"}]})
 
         return httpx.Response(404)
 
@@ -107,7 +106,7 @@ async def test_expired_session_redirect_to_login_triggers_reauth():
                     text=LOGIN_PAGE_HTML,
                     request=httpx.Request("GET", "https://test.portal/login"),
                 )
-            return httpx.Response(200, text=METERS_LIST_PAGE_HTML)
+            return httpx.Response(200, json={"data": [{"meterId": "J100000"}]})
 
         return httpx.Response(404)
 
@@ -165,7 +164,7 @@ async def test_5xx_transient_retry_with_eventual_success():
             attempts += 1
             if attempts < 3:
                 return httpx.Response(502, text="Bad Gateway")
-            return httpx.Response(200, text=METERS_LIST_PAGE_HTML)
+            return httpx.Response(200, json={"data": [{"meterId": "J100000"}]})
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
@@ -225,7 +224,7 @@ async def test_timeout_retry_and_eventual_success():
             attempts += 1
             if attempts == 1:
                 raise httpx.ReadTimeout("Timeout reading socket", request=request)
-            return httpx.Response(200, text=METERS_LIST_PAGE_HTML)
+            return httpx.Response(200, json={"data": [{"meterId": "J100000"}]})
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
@@ -379,7 +378,7 @@ async def test_session_expiry_detected_by_html_body_content():
                     headers={"Content-Type": "text/html"},
                     text=LOGIN_PAGE_HTML,
                 )
-            return httpx.Response(200, text=METERS_LIST_PAGE_HTML)
+            return httpx.Response(200, json={"data": [{"meterId": "J100000"}]})
 
         return httpx.Response(404)
 
@@ -412,7 +411,7 @@ async def test_transport_error_retry_with_eventual_success():
             attempts += 1
             if attempts < 3:
                 raise httpx.ConnectError("Connection refused", request=request)
-            return httpx.Response(200, text=METERS_LIST_PAGE_HTML)
+            return httpx.Response(200, json={"data": [{"meterId": "J100000"}]})
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
@@ -472,7 +471,7 @@ async def test_429_rate_limit_retry():
             attempts += 1
             if attempts < 2:
                 return httpx.Response(429, text="Rate limited")
-            return httpx.Response(200, text=METERS_LIST_PAGE_HTML)
+            return httpx.Response(200, json={"data": [{"meterId": "J100000"}]})
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
@@ -504,7 +503,7 @@ async def test_concurrency_semaphore_limits_parallel_requests():
         max_concurrent = max(max_concurrent, current_concurrent)
         await asyncio.sleep(0.02)
         current_concurrent -= 1
-        return httpx.Response(200, text=METERS_LIST_PAGE_HTML)
+        return httpx.Response(200, json={"data": [{"meterId": "J100000"}]})
 
     transport = httpx.MockTransport(handler)
     async with PortalClient(
@@ -536,3 +535,48 @@ async def test_read_only_guard_rejects_all_mutating_methods():
         for method in ("POST", "PUT", "PATCH", "DELETE"):
             with pytest.raises(ReadOnlyGuardError, match=f"refusing {method} request"):
                 await client.request(method, "/meters")
+
+
+@pytest.mark.asyncio
+async def test_portal_client_ping():
+    """PortalClient.ping() probes reachability cleanly without private attribute access."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login":
+            return httpx.Response(200, text="Login Page")
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with PortalClient(base_url="https://test.portal", transport=transport) as client:
+        reachable = await client.ping()
+        assert reachable is True
+
+
+@pytest.mark.asyncio
+async def test_export_keys_ephemeral_signature():
+    """PortalClient fetches key from /portal/keys and signs request with HMAC-SHA256."""
+    recorded_headers = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login":
+            return httpx.Response(200, text="OK")
+        if request.url.path == "/portal/keys":
+            return httpx.Response(200, json={"data": {"signingSecret": "super-secret-key-123"}})
+        if request.url.path == "/portal/export":
+            recorded_headers["x-timestamp"] = request.headers.get("x-timestamp")
+            recorded_headers["x-signature"] = request.headers.get("x-signature")
+            return httpx.Response(200, json={"data": [], "total": 0})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with PortalClient(
+        base_url="https://test.portal",
+        email="operator@urja.local",
+        password="secret",
+        transport=transport,
+    ) as client:
+        resp = await client.get_export(page=1)
+        assert resp.status_code == 200
+        assert recorded_headers["x-timestamp"] is not None
+        assert recorded_headers["x-signature"] is not None
+        assert len(recorded_headers["x-signature"]) == 64  # SHA-256 hex digest length

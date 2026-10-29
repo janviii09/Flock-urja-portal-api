@@ -132,8 +132,12 @@ In addition to HTML SSR, the following direct JSON and SvelteKit endpoints exist
 
 | Endpoint | Method | Response Shape / Details |
 |---|---|---|
+| `/portal/meters/search?q={q}&page={page}` | GET | `{data: [{meterId, serialNo, make, phaseType, installStatus, dtCode}], total: 403, page: 1, pageSize: 20}`. Client-side search & pagination API |
+| `/portal/dts?page={page}` | GET | `{data: [{code, name, feederCode, capacityKva}], total: 40, page: 1, pageSize: 20}`. 40 total DTs across 2 pages |
 | `/portal/meters/{id}/geo` | GET | `{data: {latitude: "...", longitude: "..."}}` (strings with ~15 decimal digits) |
 | `/portal/meters/{id}/energy` | GET | `{data: [{timestamp, kwh, kvah, voltR, ...}]}`. 30-min steps, 7-day window (e.g. ending 30/06/2026 23:30), `DD/MM/YYYY HH:mm` no tz |
+| `/portal/export?page=1` | GET | `{data: [403 meters with hierarchy, build, installType, geo: {lat, lng}], total: 403}`. Bulk dump signed via ephemeral secret from `/portal/keys` |
+| `/portal/keys` | GET | `{data: {signingSecret: "..."}}`. Ephemeral session secret used for HMAC-SHA256 signature on `/portal/export` |
 | `/meters/{id}/__data.json?x-sveltekit-invalidated=001` | GET | SvelteKit devalue format: nameplate detail + 7-level breadcrumb (`Name (CODE)`) |
 | `/meters/__data.json` | GET | Dehydrated SvelteKit meters list |
 | `/transformers/__data.json` | GET | Dehydrated SvelteKit transformers list |
@@ -143,12 +147,12 @@ In addition to HTML SSR, the following direct JSON and SvelteKit endpoints exist
 
 ## 9. Quirks & Edge Cases
 
-- **No CSRF token** on login form.
+- **SvelteKit CSRF Header Protection**: While there is no hidden form token field (`<input type="hidden">`), SvelteKit's built-in CSRF protection checks the `Origin` header. Requests to `POST /login` without an explicit `Origin: https://urja-ops.flockenergy.tech` return HTTP 403 (`Cross-site POST form submissions are forbidden`).
 - **Login Redirect**: Returns 303 redirect to `/meters`.
 - **No transformer detail pages** — the CODE values are not clickable/linked.
 - **Coordinate precision** varies — up to 15+ decimal places; strings in JSON geo endpoint.
 - **L&T make** contains an ampersand (`&`) which appears as `L&amp;T` in HTML.
 - **Decommissioned meters** still show readings data.
 - **Timestamp format**: Portal timestamps are unzoned local time (`DD/MM/YYYY HH:mm`, assumed Asia/Kolkata IST UTC+05:30).
-- **Search** is by "meter number or serial" — **UNKNOWN** if server-side or client filter.
+- **Client-side Search via Backend Endpoint**: When typing into the search bar, the SvelteKit frontend fetches `/portal/meters/search?q={query}&page={page}` asynchronously. This endpoint returns structured JSON with 20 meters per page and the total meter count (403 total).
 

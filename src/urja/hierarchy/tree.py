@@ -58,36 +58,42 @@ class HierarchyGraph:
 
     def analyze_and_build(self) -> tuple[list[TreeNode], dict[str, Any]]:
         """Process nodes, detect anomalies, apply repair rules, and construct tree."""
-        # 1. Deduplicate by code and track multiple parents
+        # 1. Deduplicate by unique key (node_path if present, else normalized code)
+        parents_by_key: dict[str, set[str]] = defaultdict(set)
         parents_by_code: dict[str, set[str]] = defaultdict(set)
-        node_by_code: dict[str, HierarchyNode] = {}
+        node_by_key: dict[str, HierarchyNode] = {}
         id_mismatches: dict[str, list[str]] = defaultdict(list)
 
         for n in self.raw_nodes:
             norm_c = normalize_code(n.code)
-            if not norm_c:
+            norm_p = normalize_code(n.parent_code)
+
+            key = normalize_code(n.node_path) or norm_c or ""
+            if not key:
                 continue
 
-            # Check whitespace/case mismatch
-            if n.code != norm_c:
+            if norm_c and n.code != norm_c:
                 id_mismatches[norm_c].append(n.code)
 
-            norm_p = normalize_code(n.parent_code)
-            if n.parent_code and n.parent_code != norm_p:
+            if n.parent_code and norm_p and n.parent_code != norm_p:
                 id_mismatches[norm_c].append(f"parent:{n.parent_code}")
 
-            if norm_p:
-                parents_by_code[norm_c].add(norm_p)
+            p_key = normalize_code(n.parent_path) or norm_p or ""
+            if norm_c and p_key:
+                norm_parent = norm_p or p_key.split("/")[-1]
+                parents_by_code[norm_c].add(norm_parent)
 
-            # Keep newest or first seen
-            if norm_c not in node_by_code:
-                node_by_code[norm_c] = n
+            if p_key:
+                parents_by_key[key].add(p_key)
 
-        all_known_codes = set(node_by_code.keys())
+            if key not in node_by_key:
+                node_by_key[key] = n
+
+        all_known_keys = set(node_by_key.keys())
 
         # 2. Anomaly detection & deterministic attachment
         effective_parent: dict[str, str | None] = {}
-        flags_by_code: dict[str, list[str]] = defaultdict(list)
+        flags_by_key: dict[str, list[str]] = defaultdict(list)
 
         defects: dict[str, Any] = {
             "multiple_parents": {},
@@ -97,60 +103,76 @@ class HierarchyGraph:
             "id_mismatches": dict(id_mismatches),
         }
 
-        for code, node in node_by_code.items():
+        # Track multiple parents at the code level for audit reporting
+        for code, code_parents in sorted(parents_by_code.items()):
+            if len(code_parents) > 1:
+                defects["multiple_parents"][code] = sorted(code_parents)
+
+        for key, node in node_by_key.items():
             flags = list(node.quality_flags)
 
-            if code in id_mismatches:
-                flags.append(f"id_mismatch:{','.join(id_mismatches[code])}")
+            norm_c = normalize_code(node.code)
+            if norm_c and norm_c in id_mismatches:
+                flags.append(f"id_mismatch:{','.join(id_mismatches[norm_c])}")
+            elif key in id_mismatches:
+                flags.append(f"id_mismatch:{','.join(id_mismatches[key])}")
 
-            parents = sorted(parents_by_code.get(code, []))
+            parents = sorted(parents_by_key.get(key, []))
 
-            # Multiple parents: deterministic rule -> pick lexically first parent
+            # Multiple parents for the same key: pick lexically first
             if len(parents) > 1:
                 chosen_parent = parents[0]
                 flags.append(f"multiple_parents:{','.join(parents)}")
-                defects["multiple_parents"][code] = parents
+                norm_c = normalize_code(node.code) or key
+                if norm_c not in defects["multiple_parents"]:
+                    defects["multiple_parents"][norm_c] = parents
             elif len(parents) == 1:
                 chosen_parent = parents[0]
             else:
                 chosen_parent = None
 
-            # Dangling parent: parent code is not in dataset
-            if chosen_parent is not None and chosen_parent not in all_known_codes:
+            # Also check if this node's code was flagged with multiple parents
+            norm_c = normalize_code(node.code)
+            if (
+                norm_c
+                and norm_c in defects["multiple_parents"]
+                and not any("multiple_parents:" in f for f in flags)
+            ):
+                flags.append(f"multiple_parents:{','.join(defects['multiple_parents'][norm_c])}")
+
+            # Dangling parent: parent key is not in dataset
+            if chosen_parent is not None and chosen_parent not in all_known_keys:
                 flags.append(f"dangling_parent:{chosen_parent}")
-                defects["dangling_parents"][code] = chosen_parent
+                defects["dangling_parents"][key] = chosen_parent
                 chosen_parent = None  # Detach to top-level to prevent broken edges
 
             # Orphan: non-Zone node with no parent
             if chosen_parent is None and node.level != HierarchyLevel.ZONE:
                 flags.append("orphan_node")
-                defects["orphans"].append(code)
+                defects["orphans"].append(key)
 
-            effective_parent[code] = chosen_parent
-            flags_by_code[code] = flags
+            effective_parent[key] = chosen_parent
+            flags_by_key[key] = flags
 
         # 3. Cycle detection via DFS path tracking
-        # Deterministic rule: break cycle by setting effective_parent[node] = None
         parent_map = dict(effective_parent)
 
-        for code in list(node_by_code.keys()):
-            curr = code
+        for key in list(node_by_key.keys()):
+            curr = key
             path = []
             seen_in_path = set()
 
             while curr is not None:
                 if curr in seen_in_path:
-                    # Cycle detected!
                     cycle_idx = path.index(curr)
                     cycle_path = [*path[cycle_idx:], curr]
                     cycle_str = "->".join(cycle_path)
                     logger.warning("Hierarchy cycle detected: %s", cycle_str)
                     defects["cycles"].append(cycle_str)
 
-                    # Break the cycle at the current node
                     effective_parent[curr] = None
                     parent_map[curr] = None
-                    flags_by_code[curr].append(f"cycle_detected:{cycle_str}")
+                    flags_by_key[curr].append(f"cycle_detected:{cycle_str}")
                     break
 
                 seen_in_path.add(curr)
@@ -159,27 +181,34 @@ class HierarchyGraph:
 
         # 4. Construct tree graph
         children_by_parent: dict[str | None, list[str]] = defaultdict(list)
-        for code, parent in effective_parent.items():
-            children_by_parent[parent].append(code)
+        for key, parent in effective_parent.items():
+            children_by_parent[parent].append(key)
 
-        def build_subtree(code: str) -> TreeNode:
-            base_node = node_by_code[code]
-            child_codes = sorted(children_by_parent.get(code, []))
-            children = [build_subtree(c) for c in child_codes]
-            meter_ids = sorted(self._meters_by_dt.get(code, []))
+        def build_subtree(key: str) -> TreeNode:
+            base_node = node_by_key[key]
+            child_keys = sorted(children_by_parent.get(key, []))
+            children = [build_subtree(c) for c in child_keys]
 
+            m_ids = set(self._meters_by_dt.get(key, []))
+            norm_c = normalize_code(base_node.code)
+            if norm_c:
+                m_ids.update(self._meters_by_dt.get(norm_c, []))
+
+            p_key = effective_parent.get(key)
             return TreeNode(
-                code=code,
+                node_path=base_node.node_path or key,
+                code=norm_c or base_node.code or key.split("/")[-1],
                 name=base_node.name,
                 level=base_node.level,
-                parent_code=effective_parent.get(code),
-                quality_flags=flags_by_code[code],
+                parent_path=p_key,
+                parent_code=p_key.split("/")[-1] if p_key else None,
+                quality_flags=flags_by_key[key],
                 children=children,
-                meter_ids=meter_ids,
+                meter_ids=sorted(m_ids),
             )
 
-        root_codes = sorted(children_by_parent.get(None, []))
-        tree = [build_subtree(rc) for rc in root_codes]
+        root_keys = sorted(children_by_parent.get(None, []))
+        tree = [build_subtree(rk) for rk in root_keys]
 
         return tree, defects
 

@@ -38,11 +38,11 @@ Flock-assign/
 ├── scripts/
 │   └── export_openapi.py             # Script to regenerate openapi.json from the FastAPI app
 ├── src/urja/
-│   ├── adapters/                     # HTML & SvelteKit parsers (only layer aware of portal layout)
-│   │   ├── base.py                   # Shared BeautifulSoup/lxml helpers and table parsers
-│   │   ├── meter_detail.py           # Meter nameplate, GPS coordinates, consumption table, breadcrumb
-│   │   ├── meters_list.py            # Meter list table and pagination metadata
-│   │   └── transformers.py           # Distribution transformer table parser
+│   ├── adapters/                     # Verified portal JSON parsers (only layer aware of portal wire shape)
+│   │   ├── export.py                 # Verified /portal/export bulk dump parser (path-based hierarchy, quality flags)
+│   │   ├── search.py                 # Verified /portal/meters/search paginated search parser
+│   │   ├── energy.py                 # Verified /portal/meters/{id}/energy parser (UTC conversion, raw_ts preservation)
+│   │   └── dts.py                    # Verified /portal/dts?page=N distribution transformer parser
 │   ├── api/                          # FastAPI presentation layer
 │   │   ├── app.py                    # Application entry point and RFC 7807 error handler registration
 │   │   ├── deps.py                   # Dependency injection providers (Store, Client, Freshness, Sync)
@@ -52,29 +52,32 @@ Flock-assign/
 │   │       └── schemas.py            # Pydantic response envelopes and pagination schemas
 │   ├── client/                       # HTTP communication with the upstream portal
 │   │   ├── exceptions.py             # Portal error hierarchy (AuthenticationError, PortalShapeError, etc.)
-│   │   └── portal.py                 # Read-only guard, session recovery, concurrency limit, retry/backoff
+│   │   └── portal.py                 # Ephemeral HMAC-SHA256 signing, SvelteKit CSRF, concurrency limit, retry/backoff
 │   ├── domain/                       # Pure domain models (Pydantic v2)
 │   │   └── models.py                 # Meter, Reading, Transformer, HierarchyNode, QualityReport, etc.
 │   ├── freshness/                    # Cache freshness engine
 │   │   └── manager.py                # SingleFlight request deduplication, tiered TTLs, ResponseMeta
 │   ├── hierarchy/                    # Network topological analysis
-│   │   └── tree.py                   # HierarchyGraph repair rules, cycle breaking, and defect auditing
+│   │   └── tree.py                   # Full-path tree synthesis, multi-parent detection, and defect auditing
 │   ├── store/                        # Local persistence layer
 │   │   ├── repository.py             # SQLite Store with WAL mode, change detection, and recursive CTEs
 │   │   └── schema.py                 # SQLite DDL with 6 justified query indexes
 │   ├── sync/                         # Data ingestion engine
-│   │   └── engine.py                 # Bulk paginated sync, atomic transactions, and sync audit runs
+│   │   ├── __main__.py               # CLI entrypoint: python -m urja.sync
+│   │   └── engine.py                 # Verified bulk export, energy ingestion, atomic transactions
 │   ├── logging.py                    # Logging setup with SecretRedactingFilter
 │   └── settings.py                   # Pydantic Settings configuration from environment variables
-└── tests/                            # Comprehensive test suite (133 tests)
+└── tests/                            # Comprehensive test suite (141 tests)
     ├── fixtures/                     # Sanitized portal HTML and JSON captures
     ├── test_adapters.py              # Parsing, schema enforcement, and portal quirk tests
     ├── test_api.py                   # End-to-end API tests with MockTransport and RFC 7807 checks
     ├── test_client.py                # Auth, session recovery, concurrency, timeout, and retry tests
     ├── test_hardening.py             # Mid-sync session expiry, 502 containment, secret scrubbing
     ├── test_hierarchy.py             # Graph defect repair, recursive CTEs, and spatial query tests
+    ├── test_phase1.py                # Contract and model verification tests
     ├── test_store.py                 # Idempotent upserts, provenance, and indexing verification
-    └── test_sync.py                  # Multi-page sync, change detection, and partial failure isolation
+    ├── test_sync.py                  # Multi-page sync, change detection, and partial failure isolation
+    └── test_verified_portal.py       # Verified JSON bulk export, HMAC signing, energy telemetry tests
 ```
 
 ---
@@ -137,7 +140,20 @@ PORTAL_CAPTURES_DIR="captures"
 
 ---
 
-## Running the Application
+### Synchronize Data from Portal
+
+To populate or refresh local SQLite data from the live portal:
+
+```bash
+# Full sync: bulk export (403 meters + 7-level hierarchy) and energy telemetry
+python -m urja.sync
+
+# Fast sync: bulk export only (skip energy telemetry)
+python -m urja.sync --no-energy
+
+# Targeted sync: bulk export + sample meters' energy telemetry
+python -m urja.sync --energy-limit 20
+```
 
 ### Start the API Server
 
@@ -159,7 +175,7 @@ Interactive documentation will be available at:
 
 ## Running Tests & Quality Checks
 
-The test suite includes 133 tests across unit, integration, and mock-transport boundaries:
+The test suite includes **141 tests** across unit, integration, and mock-transport boundaries:
 
 ```bash
 # Run all tests

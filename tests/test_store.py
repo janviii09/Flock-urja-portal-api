@@ -313,7 +313,7 @@ class TestSyncRunsAudit:
         store = Store(":memory:")
 
         # 1. Start run
-        run = store.create_sync_run(resource="meters_list")
+        run = store.create_sync_run(resource="bulk_export")
         assert run.status == SyncStatus.RUNNING
         assert run.items_new == 0
 
@@ -337,7 +337,7 @@ class TestSyncRunsAudit:
         assert finished.completed_at is not None
 
         # 4. Latest run query
-        latest = store.get_latest_sync_run("meters_list")
+        latest = store.get_latest_sync_run("bulk_export")
         assert latest is not None
         assert latest.run_id == run.run_id
 

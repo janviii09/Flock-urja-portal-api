@@ -12,9 +12,12 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import random
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -124,9 +127,15 @@ class PortalClient:
             logger.info("Authenticating with Urja Meter Ops portal as %s", self.email)
             try:
                 # SvelteKit form action: POST /login with form fields email & password
+                # Include Origin and Referer headers required by SvelteKit CSRF protection
+                headers = {
+                    "Origin": self.base_url,
+                    "Referer": f"{self.base_url}/login",
+                }
                 resp = await self._client.post(
                     "/login",
                     data={"email": self.email, "password": self.password},
+                    headers=headers,
                 )
             except httpx.TransportError as exc:
                 raise PortalUnavailableError(
@@ -152,7 +161,8 @@ class PortalClient:
     def _is_session_expired(self, response: httpx.Response, requested_path: str) -> bool:
         """Check if response indicates an expired or missing session."""
         if response.status_code in (401, 403):
-            return True
+            # If signature error, do not treat as an expired login session
+            return "signature_invalid" not in response.text
 
         # SvelteKit redirect to /login when unauthenticated
         norm_path = requested_path.split("?")[0].rstrip("/")
@@ -207,6 +217,34 @@ class PortalClient:
             self._record_capture(url, response)
 
         return response
+
+    async def get_export(self, page: int = 1) -> httpx.Response:
+        """Fetch bulk /portal/export with dynamic ephemeral session signature.
+
+        Fetches the temporary session signing secret from /portal/keys and
+        computes the HMAC-SHA256 signature required by the portal.
+        """
+        if not self._is_logged_in:
+            await self.login()
+
+        keys_resp = await self.get("/portal/keys")
+        if keys_resp.status_code != 200:
+            raise AuthenticationError(f"Failed to fetch signing key: HTTP {keys_resp.status_code}")
+
+        secret = keys_resp.json().get("data", {}).get("signingSecret", "")
+        if not secret:
+            raise AuthenticationError("No signingSecret returned by /portal/keys")
+
+        ts = str(int(time.time()))
+        query = f"page={page}"
+        payload = f"GET\n/portal/export\n{query}\n{ts}"
+        sig = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+        headers = {
+            "x-timestamp": ts,
+            "x-signature": sig,
+        }
+        return await self.get(f"/portal/export?{query}", headers=headers)
 
     async def _execute_with_retry(
         self,
@@ -274,6 +312,15 @@ class PortalClient:
         if last_exception:
             raise PortalRequestError(f"Request failed: {last_exception}") from last_exception
         raise PortalRequestError(f"Request failed after {self.max_retries} retries: {url}")
+
+    async def ping(self, timeout: float = 3.0) -> bool:
+        """Check upstream portal reachability without mutating session state."""
+        try:
+            async with self.semaphore:
+                resp = await self._client.get("/login", timeout=timeout)
+                return resp.status_code < 500
+        except Exception:
+            return False
 
     async def _sleep_backoff(self, attempt: int) -> None:
         """Calculate exponential backoff with jitter and sleep."""

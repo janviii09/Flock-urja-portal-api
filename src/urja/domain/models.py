@@ -17,7 +17,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ── Enums ─────────────────────────────────────────────────────────────
 
@@ -57,17 +57,37 @@ class HierarchyLevel(str, Enum):
 
 
 class HierarchyNode(BaseModel):
-    """A single node in the network hierarchy."""
+    """A single node in the network hierarchy keyed by its canonical full path."""
 
-    code: str  # e.g. "Z-01", "C-01", "DT-001"
-    name: str  # e.g. "Jaipur Zone 1", "Circle 1"
+    node_path: str = Field(
+        default="", description="Canonical path from root to node (e.g. Z-01/C-01/D-01/SD-01)."
+    )
+    code: str | None = None  # e.g. "Z-01", "C-01", "DT-001" (may be empty on dirty data)
+    name: str | None = None  # e.g. "Jaipur Zone 1", "Circle 1"
     level: HierarchyLevel
-    parent_code: str | None = None
+    parent_path: str | None = None  # Canonical node_path of parent node
+    parent_code: str | None = None  # Backward-compatible alias/fallback
     quality_flags: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _populate_paths_and_codes(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            code = data.get("code")
+            parent_code = data.get("parent_code")
+            if not data.get("node_path") and code:
+                data["node_path"] = str(code).strip()
+            if not data.get("parent_path") and parent_code:
+                data["parent_path"] = str(parent_code).strip()
+            if not data.get("parent_code") and data.get("parent_path"):
+                data["parent_code"] = str(data["parent_path"]).split("/")[-1]
+            if not data.get("code") and data.get("node_path"):
+                data["code"] = str(data["node_path"]).split("/")[-1]
+        return data
 
 
 class HierarchyPath(BaseModel):
-    """Full path from zone down to DT for a meter, as shown in the breadcrumb."""
+    """Full path from zone down to DT for a meter."""
 
     zone: HierarchyNode | None = None
     circle: HierarchyNode | None = None
@@ -83,10 +103,9 @@ class HierarchyPath(BaseModel):
 
 
 class Location(BaseModel):
-    """GPS coordinates from the meter detail page.
+    """GPS coordinates.
 
-    Portal displays as: "26.938961002479868, 75.83095696146852"
-    with label "Latitude / Longitude".
+    Numeric floats in export ({lat, lng}); strings in /geo ({latitude, longitude}).
     """
 
     latitude: float
@@ -95,21 +114,19 @@ class Location(BaseModel):
 
 
 class Meter(BaseModel):
-    """A smart meter as shown on the portal.
-
-    List page columns: METER, SERIAL, MAKE, PHASE, STATUS, DT
-    Detail page adds: Installation Type, Location, Consumption, hierarchy breadcrumb.
-    """
+    """A smart meter with verified portal export metadata and technical specs."""
 
     meter_id: str  # e.g. "J100000"
-    serial_no: str  # e.g. "SE33962"
-    make: str  # e.g. "HPL", "L&T", "Genus", "Allied", "Secure"
+    serial_no: str | None = None  # e.g. "SE33962"
+    make: str | None = None  # e.g. "HPL", "L&T", "Genus", "Allied", "Secure"
     phase_type: PhaseType | None = None
     installation_status: InstallationStatus | None = None
-    installation_type: str | None = None  # e.g. "Whole Current"
-    dt_code: str | None = None  # e.g. "DT-001" — from list page
+    installation_type: str | None = None  # installType: "Whole Current", "CT Operated"
+    build: str | None = None  # "legacy" or "v2" from export
+    dt_code: str | None = None  # e.g. "DT-001"
     location: Location | None = None
-    hierarchy_path: HierarchyPath | None = None
+    hierarchy_path: list[str] | HierarchyPath | None = None  # Breadcrumb segments or HierarchyPath
+    raw_hierarchy: dict[str, Any] | None = None  # Raw export dictionary
     quality_flags: list[str] = Field(default_factory=list)
 
 
@@ -117,19 +134,27 @@ class Meter(BaseModel):
 
 
 class Reading(BaseModel):
-    """A single consumption reading row from the meter detail page.
+    """A single consumption reading row.
 
-    Columns: TIMESTAMP, KWH, KVAH, V(R)
-    Timestamps look like: "23/06/2026 23:30" (DD/MM/YYYY HH:MM).
-    KWH/KVAH are cumulative floats; V(R) is voltage (integer-ish).
+    Preserves raw unzoned portal timestamp string alongside normalized UTC datetime.
+    KWH/KVAH are cumulative registers; V(R) is voltage.
     """
 
     meter_id: str
-    timestamp: datetime
+    raw_timestamp: str = ""  # Literal portal string (e.g. "23/06/2026 23:30")
+    timestamp: datetime  # UTC normalized datetime for ordering/querying
     kwh: float
     kvah: float
     voltage_r: float | None = None  # V(R) column
     quality_flags: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_raw_timestamp(cls, data: Any) -> Any:
+        if isinstance(data, dict) and not data.get("raw_timestamp") and data.get("timestamp"):
+            ts = data["timestamp"]
+            data["raw_timestamp"] = ts.isoformat() if isinstance(ts, datetime) else str(ts)
+        return data
 
 
 # ── Transformer ──────────────────────────────────────────────────────
@@ -201,13 +226,31 @@ class SyncRun(BaseModel):
 class TreeNode(BaseModel):
     """Recursive node in the reconstructed network tree."""
 
-    code: str
-    name: str
+    node_path: str = Field(default="", description="Canonical path from root to node.")
+    code: str | None = None
+    name: str | None = None
     level: HierarchyLevel
+    parent_path: str | None = None
     parent_code: str | None = None
     quality_flags: list[str] = Field(default_factory=list)
     children: list[TreeNode] = Field(default_factory=list)
     meter_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _populate_paths_and_codes(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            code = data.get("code")
+            parent_code = data.get("parent_code")
+            if not data.get("node_path") and code:
+                data["node_path"] = str(code).strip()
+            if not data.get("parent_path") and parent_code:
+                data["parent_path"] = str(parent_code).strip()
+            if not data.get("parent_code") and data.get("parent_path"):
+                data["parent_code"] = str(data["parent_path"]).split("/")[-1]
+            if not data.get("code") and data.get("node_path"):
+                data["code"] = str(data["node_path"]).split("/")[-1]
+        return data
 
 
 class MeterNearbyItem(BaseModel):

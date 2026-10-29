@@ -15,9 +15,6 @@ import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from tests.fixtures.portal_pages import (
-    METERS_LIST_PAGE_HTML,
-)
 from urja.api.app import app
 from urja.api.deps import get_client, get_freshness, get_store, get_sync_engine
 from urja.client.exceptions import (
@@ -32,52 +29,6 @@ from urja.freshness.manager import FreshnessManager
 from urja.logging import SecretRedactingFilter
 from urja.store.repository import Store
 from urja.sync.engine import SyncEngine
-
-PAGE_2_HTML = """\
-<table>
-  <thead>
-    <tr>
-      <th>METER</th><th>SERIAL</th><th>MAKE</th>
-      <th>PHASE</th><th>STATUS</th><th>DT</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><a href="/meters/J100020">J100020</a></td>
-      <td>SE99999</td><td>Secure</td><td>three</td>
-      <td>Installed</td><td>DT-004</td>
-    </tr>
-  </tbody>
-</table>
-<div class="pagination">
-  <button>Previous</button>
-  <span>Page 2 of 3</span>
-  <button>Next</button>
-</div>
-"""
-
-PAGE_3_HTML = """\
-<table>
-  <thead>
-    <tr>
-      <th>METER</th><th>SERIAL</th><th>MAKE</th>
-      <th>PHASE</th><th>STATUS</th><th>DT</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><a href="/meters/J100030">J100030</a></td>
-      <td>SE88888</td><td>L&T</td><td>single</td>
-      <td>Installed</td><td>DT-005</td>
-    </tr>
-  </tbody>
-</table>
-<div class="pagination">
-  <button>Previous</button>
-  <span>Page 3 of 3</span>
-  <button disabled>Next</button>
-</div>
-"""
 
 LOGIN_PAGE_HTML = """\
 <html>
@@ -108,17 +59,27 @@ async def test_session_expires_mid_sync_transparent_recovery():
             login_count += 1
             return httpx.Response(200, text="Login OK")
 
-        if request.url.path == "/meters":
+        if request.url.path == "/portal/meters/search":
             page = request.url.params.get("page", "1")
             page_requests += 1
 
             if page == "1":
-                # Page 1 returns initial 3 meters (page 1 of 3)
-                p1_html = METERS_LIST_PAGE_HTML.replace("Page 1 of 21", "Page 1 of 3")
-                return httpx.Response(200, text=p1_html)
+                # Page 1 returns initial 2 meters
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            {"meterId": "J100001", "make": "HPL"},
+                            {"meterId": "J100002", "make": "L&T"},
+                        ],
+                        "total": 5,
+                        "page": 1,
+                        "pageSize": 2,
+                    },
+                )
 
             if page == "2":
-                # First time page 2 is requested: session has expired! SvelteKit redirects to /login
+                # First time page 2 is requested: session expired! Returns login HTML
                 if login_count == 1:
                     return httpx.Response(
                         200,
@@ -126,10 +87,29 @@ async def test_session_expires_mid_sync_transparent_recovery():
                         headers={"content-type": "text/html"},
                     )
                 # After re-login (login_count == 2): succeeds
-                return httpx.Response(200, text=PAGE_2_HTML)
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            {"meterId": "J100003", "make": "Secure"},
+                            {"meterId": "J100004", "make": "Genus"},
+                        ],
+                        "total": 5,
+                        "page": 2,
+                        "pageSize": 2,
+                    },
+                )
 
             if page == "3":
-                return httpx.Response(200, text=PAGE_3_HTML)
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [{"meterId": "J100005", "make": "Allied"}],
+                        "total": 5,
+                        "page": 3,
+                        "pageSize": 2,
+                    },
+                )
 
         return httpx.Response(404)
 
@@ -141,12 +121,11 @@ async def test_session_expires_mid_sync_transparent_recovery():
         transport=transport,
     ) as client:
         engine = SyncEngine(store)
-        run = await engine.sync_meters_list(client)
+        run = await engine.sync_meters_search(client)
 
         # 1. Sync must finish with SUCCESS
         assert run.status == SyncStatus.SUCCESS
         assert run.items_failed == 0
-        # 3 from page 1 + 1 from page 2 + 1 from page 3 = 5 meters
         assert run.items_new == 5
         assert store.count_meters() == 5
 

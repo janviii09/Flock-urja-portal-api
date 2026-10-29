@@ -34,6 +34,9 @@
 
 ## 4. What mistake did you make while solving this (there's always one)?
 
+- **The Legacy Portal Endpoint Assumption**:
+  Initially, I assumed the portal only exposed HTML tables for meters and hierarchy, and started parsing HTML with BeautifulSoup4. When doing a deep inspection of the portal's client-side SvelteKit bundle (`nodes/4.2Bgc2kUI.js`), I discovered verified JSON endpoints: `/portal/export` (bulk unpaginated dump of all 403 meters), `/portal/meters/search`, and `/portal/meters/{id}/energy`. Furthermore, `/portal/export` required an ephemeral HMAC-SHA256 signature calculated from a session secret fetched dynamically from `GET /portal/keys`.
+  *How it was resolved*: Replaced the HTML scraping pipeline with native JSON adapters (`export.py`, `energy.py`, `search.py`). In `PortalClient`, implemented ephemeral HMAC-SHA256 signing via `/portal/keys`, added `Origin` and `Referer` headers to `POST /login` to satisfy SvelteKit CSRF checks, and keyed hierarchy nodes by canonical full path to handle multi-parent codes (`SD-01`) cleanly.
 - **The Python 3.9 AnyIO Worker Thread Event Loop Trap**:
   In FastAPI, I initially defined the dependency injection providers (`get_client()`, `get_freshness()`) as standard synchronous functions (`def get_client()`). FastAPI automatically offloads synchronous dependency functions to AnyIO worker threads via `anyio.to_thread.run_sync`. When `PortalClient` and `SingleFlight` instantiated `asyncio.Lock()` and `asyncio.Semaphore()`, Python 3.9 threw:
   `RuntimeError: There is no current event loop in thread 'AnyIO worker thread'`.

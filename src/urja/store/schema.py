@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS meters (
     phase_type TEXT,
     installation_status TEXT,
     installation_type TEXT,
+    build TEXT,
     dt_code TEXT,
     latitude REAL,
     longitude REAL,
@@ -43,6 +44,7 @@ CREATE INDEX IF NOT EXISTS idx_meters_serial_no ON meters(serial_no);
 -- 2. Readings table (composite PK prevents duplicates and ensures idempotency)
 CREATE TABLE IF NOT EXISTS readings (
     meter_id TEXT NOT NULL REFERENCES meters(meter_id) ON DELETE CASCADE,
+    raw_timestamp TEXT NOT NULL,
     timestamp TEXT NOT NULL,
     kwh REAL NOT NULL,
     kvah REAL NOT NULL,
@@ -51,20 +53,21 @@ CREATE TABLE IF NOT EXISTS readings (
     fetched_at TEXT NOT NULL,
     source_endpoint TEXT NOT NULL,
     payload_hash TEXT NOT NULL,
-    PRIMARY KEY (meter_id, timestamp)
+    PRIMARY KEY (meter_id, raw_timestamp)
 );
 
 -- Index: Range queries and load aggregation across meters by timestamp
--- (Note: queries by meter_id + timestamp are already covered by the composite primary key)
+-- (Note: queries by meter_id + raw_timestamp are already covered by the composite primary key)
 CREATE INDEX IF NOT EXISTS idx_readings_timestamp ON readings(timestamp);
 
 
--- 3. Hierarchy Nodes table (flat storage of tree nodes)
+-- 3. Hierarchy Nodes table (keyed by canonical full path to disambiguate identical codes)
 CREATE TABLE IF NOT EXISTS hierarchy_nodes (
-    code TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
+    node_path TEXT PRIMARY KEY,
+    code TEXT,
+    name TEXT,
     level TEXT NOT NULL,
-    parent_code TEXT,
+    parent_path TEXT,
     quality_flags TEXT NOT NULL DEFAULT '[]',
     fetched_at TEXT NOT NULL,
     source_endpoint TEXT NOT NULL,
@@ -72,10 +75,13 @@ CREATE TABLE IF NOT EXISTS hierarchy_nodes (
 );
 
 -- Index: Fast parent-child lookups for tree traversal (e.g. find all feeders of substation)
-CREATE INDEX IF NOT EXISTS idx_hierarchy_nodes_parent ON hierarchy_nodes(parent_code);
+CREATE INDEX IF NOT EXISTS idx_hierarchy_nodes_parent ON hierarchy_nodes(parent_path);
 
 -- Index: Filter nodes by tier level (e.g. list all substations or circles)
 CREATE INDEX IF NOT EXISTS idx_hierarchy_nodes_level ON hierarchy_nodes(level);
+
+-- Index: Fast lookup by code (even when codes appear under multiple parents)
+CREATE INDEX IF NOT EXISTS idx_hierarchy_nodes_code ON hierarchy_nodes(code);
 
 
 -- 4. Transformers table (/transformers list)

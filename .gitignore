@@ -29,3 +29,6 @@ build/
 
 # Raw portal captures (may contain credentials/cookies)
 captures/
+
+# Scratch & exploration scripts
+scratch/

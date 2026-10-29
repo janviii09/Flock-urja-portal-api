@@ -479,7 +479,7 @@
           "v1"
         ],
         "summary": "Direct children of a hierarchy node",
-        "description": "Returns the immediate children of the specified hierarchy node code.",
+        "description": "Returns the immediate children of the specified hierarchy node path or code.",
         "operationId": "get_node_children_v1_nodes__node_id__children_get",
         "parameters": [
           {
@@ -489,15 +489,15 @@
             "schema": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 64,
-              "pattern": "^[A-Za-z0-9_\\-\\.]+$",
-              "description": "Hierarchy node unique code",
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9_\\-\\.\\/ %]+$",
+              "description": "Hierarchy node unique path or code",
               "examples": [
                 "ZONE-NORTH"
               ],
               "title": "Node Id"
             },
-            "description": "Hierarchy node unique code"
+            "description": "Hierarchy node unique path or code"
           }
         ],
         "responses": {
@@ -540,15 +540,15 @@
             "schema": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 64,
-              "pattern": "^[A-Za-z0-9_\\-\\.]+$",
-              "description": "Hierarchy node unique code",
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9_\\-\\.\\/ %]+$",
+              "description": "Hierarchy node unique path or code",
               "examples": [
                 "ZONE-NORTH"
               ],
               "title": "Node Id"
             },
-            "description": "Hierarchy node unique code"
+            "description": "Hierarchy node unique path or code"
           }
         ],
         "responses": {
@@ -748,16 +748,47 @@
       },
       "HierarchyNode": {
         "properties": {
-          "code": {
+          "node_path": {
             "type": "string",
+            "title": "Node Path",
+            "description": "Canonical path from root to node (e.g. Z-01/C-01/D-01/SD-01).",
+            "default": ""
+          },
+          "code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Code"
           },
           "name": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Name"
           },
           "level": {
             "$ref": "#/components/schemas/HierarchyLevel"
+          },
+          "parent_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Path"
           },
           "parent_code": {
             "anyOf": [
@@ -780,12 +811,10 @@
         },
         "type": "object",
         "required": [
-          "code",
-          "name",
           "level"
         ],
         "title": "HierarchyNode",
-        "description": "A single node in the network hierarchy."
+        "description": "A single node in the network hierarchy keyed by its canonical full path."
       },
       "HierarchyNodeListResponse": {
         "properties": {
@@ -892,7 +921,7 @@
         },
         "type": "object",
         "title": "HierarchyPath",
-        "description": "Full path from zone down to DT for a meter, as shown in the breadcrumb."
+        "description": "Full path from zone down to DT for a meter."
       },
       "HierarchySubtreeResponse": {
         "properties": {
@@ -974,7 +1003,7 @@
           "longitude"
         ],
         "title": "Location",
-        "description": "GPS coordinates from the meter detail page.\n\nPortal displays as: \"26.938961002479868, 75.83095696146852\"\nwith label \"Latitude / Longitude\"."
+        "description": "GPS coordinates.\n\nNumeric floats in export ({lat, lng}); strings in /geo ({latitude, longitude})."
       },
       "Meter": {
         "properties": {
@@ -983,11 +1012,25 @@
             "title": "Meter Id"
           },
           "serial_no": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Serial No"
           },
           "make": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Make"
           },
           "phase_type": {
@@ -1021,6 +1064,17 @@
             ],
             "title": "Installation Type"
           },
+          "build": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Build"
+          },
           "dt_code": {
             "anyOf": [
               {
@@ -1045,12 +1099,31 @@
           "hierarchy_path": {
             "anyOf": [
               {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
                 "$ref": "#/components/schemas/HierarchyPath"
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Hierarchy Path"
+          },
+          "raw_hierarchy": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Hierarchy"
           },
           "quality_flags": {
             "items": {
@@ -1062,12 +1135,10 @@
         },
         "type": "object",
         "required": [
-          "meter_id",
-          "serial_no",
-          "make"
+          "meter_id"
         ],
         "title": "Meter",
-        "description": "A smart meter as shown on the portal.\n\nList page columns: METER, SERIAL, MAKE, PHASE, STATUS, DT\nDetail page adds: Installation Type, Location, Consumption, hierarchy breadcrumb."
+        "description": "A smart meter with verified portal export metadata and technical specs."
       },
       "MeterDetailResponse": {
         "properties": {
@@ -1233,6 +1304,11 @@
             "type": "string",
             "title": "Meter Id"
           },
+          "raw_timestamp": {
+            "type": "string",
+            "title": "Raw Timestamp",
+            "default": ""
+          },
           "timestamp": {
             "type": "string",
             "format": "date-time",
@@ -1273,7 +1349,7 @@
           "kvah"
         ],
         "title": "Reading",
-        "description": "A single consumption reading row from the meter detail page.\n\nColumns: TIMESTAMP, KWH, KVAH, V(R)\nTimestamps look like: \"23/06/2026 23:30\" (DD/MM/YYYY HH:MM).\nKWH/KVAH are cumulative floats; V(R) is voltage (integer-ish)."
+        "description": "A single consumption reading row.\n\nPreserves raw unzoned portal timestamp string alongside normalized UTC datetime.\nKWH/KVAH are cumulative registers; V(R) is voltage."
       },
       "ResponseMeta": {
         "properties": {
@@ -1390,16 +1466,47 @@
       },
       "TreeNode": {
         "properties": {
-          "code": {
+          "node_path": {
             "type": "string",
+            "title": "Node Path",
+            "description": "Canonical path from root to node.",
+            "default": ""
+          },
+          "code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Code"
           },
           "name": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Name"
           },
           "level": {
             "$ref": "#/components/schemas/HierarchyLevel"
+          },
+          "parent_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Path"
           },
           "parent_code": {
             "anyOf": [
@@ -1436,8 +1543,6 @@
         },
         "type": "object",
         "required": [
-          "code",
-          "name",
           "level"
         ],
         "title": "TreeNode",

@@ -124,8 +124,8 @@ async def list_meters(
     if total == 0 and not cursor:
         try:
             await freshness.single_flight.do(
-                "sync:meters_list_seed",
-                lambda: sync_engine.sync_meters_list(client, max_pages=1),
+                "sync:meters_seed",
+                lambda: sync_engine.sync_bulk_export(client),
             )
             meters, next_cursor, has_more, fetched_at = store.list_meters_cursor(
                 cursor=cursor,
@@ -432,13 +432,7 @@ async def health(
     client: Annotated[PortalClient, Depends(get_client)],
     freshness: Annotated[FreshnessManager, Depends(get_freshness)],
 ) -> HealthResponse:
-    portal_reachable = False
-    try:
-        # Lightweight check: portal login endpoint is reachable
-        resp = await client._client.get("/login", timeout=3.0)
-        portal_reachable = resp.status_code < 500
-    except Exception:
-        portal_reachable = False
+    portal_reachable = await client.ping(timeout=3.0)
 
     last_sync = store.get_latest_sync_run()
     status = "ok" if portal_reachable else "degraded"
@@ -493,16 +487,16 @@ async def get_hierarchy(
     "/nodes/{node_id}/children",
     response_model=HierarchyNodeListResponse,
     summary="Direct children of a hierarchy node",
-    description="Returns the immediate children of the specified hierarchy node code.",
+    description="Returns the immediate children of the specified hierarchy node path or code.",
 )
 async def get_node_children(
     node_id: Annotated[
         str,
         Path(
             min_length=1,
-            max_length=64,
-            pattern=r"^[A-Za-z0-9_\-\.]+$",
-            description="Hierarchy node unique code",
+            max_length=256,
+            pattern=r"^[A-Za-z0-9_\-\.\/ %]+$",
+            description="Hierarchy node unique path or code",
             examples=["ZONE-NORTH"],
         ),
     ],
@@ -536,9 +530,9 @@ async def get_node_subtree(
         str,
         Path(
             min_length=1,
-            max_length=64,
-            pattern=r"^[A-Za-z0-9_\-\.]+$",
-            description="Hierarchy node unique code",
+            max_length=256,
+            pattern=r"^[A-Za-z0-9_\-\.\/ %]+$",
+            description="Hierarchy node unique path or code",
             examples=["ZONE-NORTH"],
         ),
     ],

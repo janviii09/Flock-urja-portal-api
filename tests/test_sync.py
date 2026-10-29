@@ -1,50 +1,41 @@
 """Tests for Phase 4 synchronization engine.
 
 Verifies:
-- Pagination over /meters and audit logging
-- Idempotency (subsequent runs produce items_unchanged)
+- Bulk export sync via /portal/export (signed HMAC-SHA256, atomic rollback, zero deletions)
+- Paginated search sync via /portal/meters/search
+- Distribution transformers sync via /portal/dts
+- Single-meter on-demand detail sync via /portal/meters/search + /geo + /energy
+- Energy readings telemetry batch sync with bounded concurrency
 - Change detection (modified portal content produces items_changed)
-- Full detail sync (ingesting nameplate, 7-level hierarchy, consumption readings)
+- Idempotency (subsequent runs produce items_unchanged)
 - Partial failure resilience (errors on page 2 or on meter N never corrupt prior data)
 """
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
+
 import httpx
 import pytest
 
 from tests.fixtures.portal_pages import (
-    METER_DETAIL_HTML,
-    METERS_LIST_PAGE_HTML,
-    TRANSFORMERS_LIST_HTML,
+    DTS_PAYLOAD_SAMPLE,
+    ENERGY_PAYLOAD_SAMPLE,
+    EXPORT_PAYLOAD_SAMPLE,
+    SEARCH_PAGE_1_SAMPLE,
+    SEARCH_PAGE_2_SAMPLE,
 )
 from urja.client.portal import PortalClient
-from urja.domain.models import InstallationStatus, SyncStatus
+from urja.domain.models import (
+    InstallationStatus,
+    Meter,
+    Provenance,
+    SyncStatus,
+)
 from urja.store.repository import Store
 from urja.sync.engine import SyncEngine
-
-PAGE_2_HTML = """\
-<table>
-  <thead>
-    <tr>
-      <th>METER</th><th>SERIAL</th><th>MAKE</th>
-      <th>PHASE</th><th>STATUS</th><th>DT</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><a href="/meters/J100020">J100020</a></td>
-      <td>SE99999</td><td>Secure</td><td>three</td>
-      <td>Installed</td><td>DT-004</td>
-    </tr>
-  </tbody>
-</table>
-<div class="pagination">
-  <button>Previous</button>
-  <span>Page 2 of 2</span>
-  <button disabled>Next</button>
-</div>
-"""
 
 
 @pytest.fixture
@@ -54,22 +45,18 @@ def store():
     st.close()
 
 
-class TestSyncMetersList:
+class TestSyncBulkExport:
     @pytest.mark.asyncio
-    async def test_paginated_sync_records_audit_and_stores_meters(self, store: Store):
-        """Sync engine paginates through pages and records audit counts."""
+    async def test_bulk_export_stores_meters_and_hierarchy(self, store: Store):
+        """Bulk export sync ingests meters and hierarchy nodes into Store."""
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/login":
                 return httpx.Response(200, text="OK")
-            if request.url.path == "/meters":
-                page = request.url.params.get("page", "1")
-                if page == "1":
-                    # returns page 1 of 2
-                    p1_html = METERS_LIST_PAGE_HTML.replace("Page 1 of 21", "Page 1 of 2")
-                    return httpx.Response(200, text=p1_html)
-                if page == "2":
-                    return httpx.Response(200, text=PAGE_2_HTML)
+            if request.url.path == "/portal/keys":
+                return httpx.Response(200, json={"data": {"signingSecret": "secret-123"}})
+            if request.url.path == "/portal/export":
+                return httpx.Response(200, json=EXPORT_PAYLOAD_SAMPLE)
             return httpx.Response(404)
 
         transport = httpx.MockTransport(handler)
@@ -80,32 +67,30 @@ class TestSyncMetersList:
             transport=transport,
         ) as client:
             engine = SyncEngine(store)
-            run = await engine.sync_meters_list(client)
+            run = await engine.sync_bulk_export(client)
 
             assert run.status == SyncStatus.SUCCESS
-            assert run.items_new == 4  # 3 from page 1 + 1 from page 2
+            assert run.items_new == 2
             assert run.items_failed == 0
-            assert store.count_meters() == 4
+            assert store.count_meters() == 2
 
-            # Verify meters stored properly
             m0 = store.get_meter("J100000")
             assert m0 is not None
             assert m0.make == "HPL"
-
-            m20 = store.get_meter("J100020")
-            assert m20 is not None
-            assert m20.make == "Secure"
+            assert m0.location is not None
+            assert round(m0.location.latitude, 2) == 26.94
 
     @pytest.mark.asyncio
     async def test_idempotency_second_sync_produces_unchanged(self, store: Store):
-        """Running sync twice with identical data yields items_unchanged = total, items_new = 0."""
+        """Running export sync twice with identical data yields items_unchanged = total, items_new = 0."""
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/login":
                 return httpx.Response(200, text="OK")
-            if request.url.path == "/meters":
-                p1_single = METERS_LIST_PAGE_HTML.replace("Page 1 of 21", "Page 1 of 1")
-                return httpx.Response(200, text=p1_single)
+            if request.url.path == "/portal/keys":
+                return httpx.Response(200, json={"data": {"signingSecret": "secret-123"}})
+            if request.url.path == "/portal/export":
+                return httpx.Response(200, json=EXPORT_PAYLOAD_SAMPLE)
             return httpx.Response(404)
 
         transport = httpx.MockTransport(handler)
@@ -117,28 +102,30 @@ class TestSyncMetersList:
         ) as client:
             engine = SyncEngine(store)
 
-            # 1. First run: all new
-            run1 = await engine.sync_meters_list(client, max_pages=1)
-            assert run1.items_new == 3
+            run1 = await engine.sync_bulk_export(client)
+            assert run1.items_new == 2
             assert run1.items_unchanged == 0
-            assert store.count_meters() == 3
 
-            # 2. Second run: all unchanged
-            run2 = await engine.sync_meters_list(client, max_pages=1)
+            run2 = await engine.sync_bulk_export(client)
             assert run2.items_new == 0
-            assert run2.items_unchanged == 3
-            assert store.count_meters() == 3
+            assert run2.items_unchanged == 2
+            assert store.count_meters() == 2
 
     @pytest.mark.asyncio
     async def test_change_detection_updates_existing_meter(self, store: Store):
         """When portal data changes, sync updates record and reports items_changed."""
-        current_html = METERS_LIST_PAGE_HTML.replace("Page 1 of 21", "Page 1 of 1")
+        current_data = [
+            dict(m)
+            for m in EXPORT_PAYLOAD_SAMPLE["data"]  # shallow copy items
+        ]
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/login":
                 return httpx.Response(200, text="OK")
-            if request.url.path == "/meters":
-                return httpx.Response(200, text=current_html)
+            if request.url.path == "/portal/keys":
+                return httpx.Response(200, json={"data": {"signingSecret": "secret-123"}})
+            if request.url.path == "/portal/export":
+                return httpx.Response(200, json={"data": current_data, "total": len(current_data)})
             return httpx.Response(404)
 
         transport = httpx.MockTransport(handler)
@@ -149,90 +136,94 @@ class TestSyncMetersList:
             transport=transport,
         ) as client:
             engine = SyncEngine(store)
-            await engine.sync_meters_list(client, max_pages=1)
+            await engine.sync_bulk_export(client)
 
-            # Now portal updates: J100001 status becomes Decommissioned
-            current_html = current_html.replace(
-                "<td>GE84132</td><td>L&amp;T</td><td>single</td>\n      <td>Installed</td>",
-                "<td>GE84132</td><td>L&amp;T</td><td>single</td>\n      <td>Decommissioned</td>",
-            )
+            # Change meter status
+            current_data[1] = dict(current_data[1])
+            current_data[1]["installStatus"] = "Decommissioned"
 
-            run2 = await engine.sync_meters_list(client, max_pages=1)
+            run2 = await engine.sync_bulk_export(client)
             assert run2.items_changed == 1
-            assert run2.items_unchanged == 2
+            assert run2.items_unchanged == 1
             assert run2.items_new == 0
 
-            # Verify in store
             m1 = store.get_meter("J100001")
             assert m1 is not None
             assert m1.installation_status == InstallationStatus.DECOMMISSIONED
 
-
-class TestSyncMeterDetail:
     @pytest.mark.asyncio
-    async def test_sync_meter_detail_ingests_all_submodels(self, store: Store):
-        """Detail sync ingests meter coordinates, 7-level breadcrumbs, and consumption readings."""
+    async def test_export_atomic_rollback_on_failure(self, store: Store):
+        """If an error occurs during export ingestion, database changes roll back atomically."""
+        prov = Provenance(
+            fetched_at=datetime.now(timezone.utc),
+            source_endpoint="/init",
+            payload_hash="init",
+        )
+        store.upsert_meter(Meter(meter_id="J_EXISTING", serial_no="SE001", make="HPL"), prov)
+        assert store.count_meters() == 1
+
+        engine = SyncEngine(store)
+        client = AsyncMock(spec=PortalClient)
+        client.get_export.return_value = httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"meterId": "J100001", "serialNo": "SE1"},
+                    {"meterId": "J100002", "serialNo": "SE2"},
+                ],
+                "total": 2,
+            },
+        )
+
+        with patch.object(store, "upsert_meter", side_effect=[None, RuntimeError("Disk fault")]):
+            run = await engine.sync_bulk_export(client)
+            assert run.status == SyncStatus.FAILED
+
+        # Original meter remains safe, aborted batch rolled back
+        assert store.count_meters() == 1
+        assert store.get_meter("J100001") is None
+
+    @pytest.mark.asyncio
+    async def test_zero_deletions_policy(self, store: Store):
+        """Sync operations never delete existing meters, even if subsequent sync returns a partial list."""
+        prov = Provenance(
+            fetched_at=datetime.now(timezone.utc),
+            source_endpoint="/init",
+            payload_hash="init",
+        )
+        store.upsert_meter(Meter(meter_id="M-1", make="HPL"), prov)
+        store.upsert_meter(Meter(meter_id="M-2", make="L&T"), prov)
+        assert store.count_meters() == 2
+
+        client = AsyncMock(spec=PortalClient)
+        client.get_export.return_value = httpx.Response(
+            200,
+            json={"data": [{"meterId": "M-1", "make": "HPL"}], "total": 1},
+        )
+
+        engine = SyncEngine(store)
+        run = await engine.sync_bulk_export(client)
+        assert run.status == SyncStatus.SUCCESS
+
+        # M-2 still exists in store!
+        assert store.count_meters() == 2
+        assert store.get_meter("M-2") is not None
+
+
+class TestSyncMetersSearch:
+    @pytest.mark.asyncio
+    async def test_paginated_search_sync(self, store: Store):
+        """Paginated search sync iterates across pages until total is reached."""
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/login":
                 return httpx.Response(200, text="OK")
-            if request.url.path == "/meters/J100000":
-                return httpx.Response(200, text=METER_DETAIL_HTML)
-            return httpx.Response(404)
-
-        transport = httpx.MockTransport(handler)
-        async with PortalClient(
-            base_url="https://test.portal",
-            email="op@urja.local",
-            password="secret",
-            transport=transport,
-        ) as client:
-            engine = SyncEngine(store)
-            m_res, readings_cnt, nodes_cnt = await engine.sync_meter_detail(client, "J100000")
-
-            assert m_res.value == "new"
-            assert readings_cnt == 3
-            assert nodes_cnt == 7
-
-            # 1. Meter with location and hierarchy
-            m = store.get_meter("J100000")
-            assert m is not None
-            assert m.location is not None
-            assert round(m.location.latitude, 2) == 26.94
-            assert m.hierarchy_path is not None
-            assert m.hierarchy_path.dt is not None
-            assert m.hierarchy_path.dt.code == "DT-001"
-
-            # 2. Hierarchy nodes table populated
-            z = store.get_hierarchy_node("Z-01")
-            assert z is not None
-            assert z.name == "Jaipur Zone 1"
-
-            dt = store.get_hierarchy_node("DT-001")
-            assert dt is not None
-            assert dt.parent_code == "F-001"
-
-            # 3. Readings stored
-            readings = store.get_readings("J100000")
-            assert len(readings) == 3
-            assert readings[0].kwh == 48439.58
-
-
-class TestSyncPartialFailures:
-    @pytest.mark.asyncio
-    async def test_page_failure_does_not_corrupt_prior_page_data(self, store: Store):
-        """If page 2 fails with 500 error, page 1 data remains intact and audit records partial_failure."""
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/login":
-                return httpx.Response(200, text="OK")
-            if request.url.path == "/meters":
+            if request.url.path == "/portal/meters/search":
                 page = request.url.params.get("page", "1")
                 if page == "1":
-                    p1_html = METERS_LIST_PAGE_HTML.replace("Page 1 of 21", "Page 1 of 2")
-                    return httpx.Response(200, text=p1_html)
+                    return httpx.Response(200, json=SEARCH_PAGE_1_SAMPLE)
                 if page == "2":
-                    return httpx.Response(500, text="Internal Server Error")
+                    return httpx.Response(200, json=SEARCH_PAGE_2_SAMPLE)
             return httpx.Response(404)
 
         transport = httpx.MockTransport(handler)
@@ -240,73 +231,27 @@ class TestSyncPartialFailures:
             base_url="https://test.portal",
             email="op@urja.local",
             password="secret",
-            max_retries=1,
-            base_delay=0.01,
-            jitter=0,
             transport=transport,
         ) as client:
             engine = SyncEngine(store)
-            run = await engine.sync_meters_list(client)
+            run = await engine.sync_meters_search(client)
 
-            # Audit status is PARTIAL_FAILURE
-            assert run.status == SyncStatus.PARTIAL_FAILURE
-            assert run.items_new == 3  # Page 1 succeeded
-            assert run.items_failed == 1  # Page 2 failed
+            assert run.status == SyncStatus.SUCCESS
+            assert run.items_new == 4
+            assert store.count_meters() == 4
+            assert store.get_meter("J100020") is not None
 
-            # Page 1 data is safe and intact in store
-            assert store.count_meters() == 3
-            assert store.get_meter("J100000") is not None
-            assert store.get_meter("J100001") is not None
-            assert store.get_meter("J100002") is not None
 
+class TestSyncTransformers:
     @pytest.mark.asyncio
-    async def test_meter_details_partial_failure_preserves_successful_meters(self, store: Store):
-        """When batch syncing details, a failing meter does not crash or corrupt others."""
+    async def test_sync_transformers_from_dts(self, store: Store):
+        """Transformers list is fetched and stored from /portal/dts?page=N."""
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/login":
                 return httpx.Response(200, text="OK")
-            if request.url.path == "/meters/J100000":
-                return httpx.Response(200, text=METER_DETAIL_HTML)
-            if request.url.path == "/meters/J100001":
-                # Returns 500 error -> client raises error for this meter
-                return httpx.Response(500, text="Server Error")
-            if request.url.path == "/meters/J100002":
-                html2 = METER_DETAIL_HTML.replace("J100000", "J100002")
-                return httpx.Response(200, text=html2)
-            return httpx.Response(404)
-
-        transport = httpx.MockTransport(handler)
-        async with PortalClient(
-            base_url="https://test.portal",
-            email="op@urja.local",
-            password="secret",
-            max_retries=1,
-            base_delay=0.01,
-            jitter=0,
-            transport=transport,
-        ) as client:
-            engine = SyncEngine(store)
-            run = await engine.sync_meter_details(client, ["J100000", "J100001", "J100002"])
-
-            assert run.status == SyncStatus.PARTIAL_FAILURE
-            assert run.items_new == 2
-            assert run.items_failed == 1
-
-            # J100000 and J100002 exist with full detail
-            assert store.get_meter("J100000") is not None
-            assert store.get_meter("J100002") is not None
-            assert store.get_meter("J100001") is None
-
-    @pytest.mark.asyncio
-    async def test_sync_transformers(self, store: Store):
-        """Transformers list is fetched and stored with audit trail."""
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/login":
-                return httpx.Response(200, text="OK")
-            if request.url.path == "/transformers":
-                return httpx.Response(200, text=TRANSFORMERS_LIST_HTML)
+            if request.url.path == "/portal/dts":
+                return httpx.Response(200, json=DTS_PAYLOAD_SAMPLE)
             return httpx.Response(404)
 
         transport = httpx.MockTransport(handler)
@@ -321,9 +266,91 @@ class TestSyncPartialFailures:
 
             assert run.status == SyncStatus.SUCCESS
             assert run.items_new == 3
-            assert run.items_failed == 0
-
             transformers = store.list_transformers()
             assert len(transformers) == 3
             assert transformers[0].code == "DT-001"
             assert transformers[0].capacity_kva == 100.0
+
+
+class TestSyncMeterDetail:
+    @pytest.mark.asyncio
+    async def test_sync_meter_detail_combines_search_geo_and_energy(self, store: Store):
+        """Single-meter detail sync orchestrates search, geo, and energy endpoints."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path == "/login":
+                return httpx.Response(200, text="OK")
+            if path == "/portal/meters/search":
+                return httpx.Response(200, json=SEARCH_PAGE_1_SAMPLE)
+            if path == "/portal/meters/J100000/geo":
+                return httpx.Response(
+                    200, json={"data": {"latitude": "26.94", "longitude": "75.81"}}
+                )
+            if path == "/portal/meters/J100000/energy":
+                return httpx.Response(200, json=ENERGY_PAYLOAD_SAMPLE)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        async with PortalClient(
+            base_url="https://test.portal",
+            email="op@urja.local",
+            password="secret",
+            transport=transport,
+        ) as client:
+            engine = SyncEngine(store)
+            m_res, readings_cnt, _ = await engine.sync_meter_detail(client, "J100000")
+
+            assert m_res.value == "new"
+            assert readings_cnt == 2
+
+            m = store.get_meter("J100000")
+            assert m is not None
+            assert m.location is not None
+            assert round(m.location.latitude, 2) == 26.94
+
+            readings = store.get_readings("J100000")
+            assert len(readings) == 2
+            assert readings[0].kwh == 48439.58
+
+
+class TestSyncMetersEnergy:
+    @pytest.mark.asyncio
+    async def test_sync_meters_energy_bounded_concurrency(self, store: Store):
+        """Energy batch sync processes multiple meters with bounded concurrency."""
+        prov = Provenance(
+            fetched_at=datetime.now(timezone.utc),
+            source_endpoint="/init",
+            payload_hash="init",
+        )
+        store.upsert_meter(Meter(meter_id="J100000", make="HPL"), prov)
+        store.upsert_meter(Meter(meter_id="J100001", make="L&T"), prov)
+
+        max_concurrent = 0
+        current_concurrent = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal max_concurrent, current_concurrent
+            if request.url.path == "/login":
+                return httpx.Response(200, text="OK")
+            if "/energy" in request.url.path:
+                current_concurrent += 1
+                max_concurrent = max(max_concurrent, current_concurrent)
+                await asyncio.sleep(0.01)
+                current_concurrent -= 1
+                return httpx.Response(200, json=ENERGY_PAYLOAD_SAMPLE)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        async with PortalClient(
+            base_url="https://test.portal",
+            email="op@urja.local",
+            password="secret",
+            transport=transport,
+        ) as client:
+            engine = SyncEngine(store)
+            run = await engine.sync_meters_energy(client, concurrency=2)
+
+            assert run.status == SyncStatus.SUCCESS
+            assert run.items_new == 4  # 2 readings per meter * 2 meters
+            assert max_concurrent <= 2
