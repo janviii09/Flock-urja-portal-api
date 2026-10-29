@@ -31,7 +31,8 @@ One line per decision, dated. Categories: `DECISION`, `ASSUMPTION`, `TRADE-OFF`,
 | 2026-10-29 | DECISION    | Single-flight deduplication via `asyncio.Future` coalesces concurrent queries for expired resources into a single upstream request. |
 | 2026-10-29 | DECISION    | RFC 7807 Problem Details (`application/problem+json`) enforced for all 4xx/5xx error responses. |
 | 2026-10-29 | DECISION    | Cursor pagination (`meter_id > cursor`) on `/v1/meters` for stable O(1) page access. |
-| 2026-10-29 | DECISION    | Every API response envelope includes `meta: {fetched_at, age_seconds, stale, source}`. |
-
-
-
+| 2026-10-29 | DECISION    | Deterministic hierarchy repair: normalize IDs via `UPPER(TRIM())`; resolve multiple parents to lexically first parent; break cycles by detaching back-edge to root (`parent = None`); detach dangling parents to root; flag non-Zone root nodes as orphans. |
+| 2026-10-29 | DECISION    | Invariant: Network graph repair never deletes or drops nodes; 100% of discovered nodes are preserved in the tree and defect report. |
+| 2026-10-29 | DECISION    | Subtree querying via SQLite recursive CTE (`WITH RECURSIVE`) with a depth guard (`depth < 20`) to eliminate infinite recursion risk on graph anomalies. |
+| 2026-10-29 | DECISION    | Two-phase spatial query for `/v1/meters/nearby`: bounding-box prefilter in SQL followed by exact Haversine great-circle calculation; explicitly excludes Null Island `(0,0)`. |
+| 2026-10-29 | TRADE-OFF   | In-memory DFS tree synthesis and SQLite recursive CTEs are optimal for utility district scale (<50k nodes), but struggle at nation scale (>10M nodes) where PostgreSQL+PostGIS with materialized path indexing (ltree) or Neo4j is required. |

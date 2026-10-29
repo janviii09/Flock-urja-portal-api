@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -192,3 +193,40 @@ class SyncRun(BaseModel):
     items_unchanged: int = 0
     items_failed: int = 0
     error_message: str | None = None
+
+
+# ── Hierarchy Tree & Query Models ─────────────────────────────────────
+
+
+class TreeNode(BaseModel):
+    """Recursive node in the reconstructed network tree."""
+
+    code: str
+    name: str
+    level: HierarchyLevel
+    parent_code: str | None = None
+    quality_flags: list[str] = Field(default_factory=list)
+    children: list[TreeNode] = Field(default_factory=list)
+    meter_ids: list[str] = Field(default_factory=list)
+
+
+class MeterNearbyItem(BaseModel):
+    """A meter and its calculated great-circle distance from a query coordinate."""
+
+    meter: Meter
+    distance_km: float
+
+
+class QualityReport(BaseModel):
+    """Defect report aggregating data quality issues across the utility network."""
+
+    total_meters_audited: int
+    total_nodes_audited: int
+    hierarchy_defects: dict[str, Any]
+    meter_defects: dict[str, Any]
+    consumption_defects: dict[str, Any]
+    quality_score: float  # Percentage of clean, defect-free records (0.0 to 100.0)
+
+
+TreeNode.model_rebuild()
+QualityReport.model_rebuild()

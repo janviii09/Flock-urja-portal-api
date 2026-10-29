@@ -171,6 +171,106 @@
         }
       }
     },
+    "/v1/meters/nearby": {
+      "get": {
+        "tags": [
+          "v1"
+        ],
+        "summary": "Spatial meter query with bounding-box prefilter and haversine distance",
+        "description": "Finds smart meters within radius_km of a GPS coordinate using two-phase querying: bounding-box bounding filter in SQL followed by exact great-circle haversine calculation. Excludes Null Island (0,0) and records with missing coordinates.",
+        "operationId": "get_meters_nearby_v1_meters_nearby_get",
+        "parameters": [
+          {
+            "name": "lat",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "number",
+              "maximum": 90.0,
+              "minimum": -90.0,
+              "description": "Latitude in decimal degrees (-90 to 90).",
+              "examples": [
+                28.6139
+              ],
+              "title": "Lat"
+            },
+            "description": "Latitude in decimal degrees (-90 to 90)."
+          },
+          {
+            "name": "lon",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "number",
+              "maximum": 180.0,
+              "minimum": -180.0,
+              "description": "Longitude in decimal degrees (-180 to 180).",
+              "examples": [
+                77.209
+              ],
+              "title": "Lon"
+            },
+            "description": "Longitude in decimal degrees (-180 to 180)."
+          },
+          {
+            "name": "radius_km",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "maximum": 500.0,
+              "exclusiveMinimum": 0.0,
+              "description": "Search radius in kilometers (default 5.0 km, max 500 km).",
+              "examples": [
+                5.0
+              ],
+              "default": 5.0,
+              "title": "Radius Km"
+            },
+            "description": "Search radius in kilometers (default 5.0 km, max 500 km)."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Maximum number of nearby meters to return (default 20, max 100).",
+              "examples": [
+                20
+              ],
+              "default": 20,
+              "title": "Limit"
+            },
+            "description": "Maximum number of nearby meters to return (default 20, max 100)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetersNearbyResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/meters/{meter_id}": {
       "get": {
         "tags": [
@@ -324,6 +424,136 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/hierarchy": {
+      "get": {
+        "tags": [
+          "v1"
+        ],
+        "summary": "Reconstructed 7-level network tree",
+        "description": "Synthesizes the complete utility network hierarchy tree (Zone \u203a Circle \u203a Division \u203a Subdivision \u203a Substation \u203a Feeder \u203a DT) with deterministic repair rules: ID normalization, multiple parent tie-breaking, cycle breaking, and dangling ref detachment. No nodes are ever deleted.",
+        "operationId": "get_hierarchy_v1_hierarchy_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HierarchyTreeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/nodes/{node_id}/children": {
+      "get": {
+        "tags": [
+          "v1"
+        ],
+        "summary": "Direct children of a hierarchy node",
+        "description": "Returns the immediate children of the specified hierarchy node code.",
+        "operationId": "get_node_children_v1_nodes__node_id__children_get",
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HierarchyNodeListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/nodes/{node_id}/subtree": {
+      "get": {
+        "tags": [
+          "v1"
+        ],
+        "summary": "Subtree query using recursive CTE",
+        "description": "Fetches all descendants of the specified hierarchy node using a recursive Common Table Expression (CTE) with depth guard.",
+        "operationId": "get_node_subtree_v1_nodes__node_id__subtree_get",
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HierarchySubtreeResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/quality": {
+      "get": {
+        "tags": [
+          "v1"
+        ],
+        "summary": "Network data quality defect report",
+        "description": "Audits the network for data anomalies across hierarchy (orphans, cycles, multiple parents, dangling references, ID mismatches), meters (null island, missing nameplates), and consumption readings (monotonicity violations).",
+        "operationId": "get_quality_v1_quality_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QualityResponse"
                 }
               }
             }
@@ -521,6 +751,29 @@
         "title": "HierarchyNode",
         "description": "A single node in the network hierarchy."
       },
+      "HierarchyNodeListResponse": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/HierarchyNode"
+            },
+            "type": "array",
+            "title": "Data",
+            "description": "Direct child nodes of the requested hierarchy node."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta",
+            "description": "Cache freshness and origin metadata."
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "HierarchyNodeListResponse",
+        "description": "Response payload for GET /v1/nodes/{id}/children."
+      },
       "HierarchyPath": {
         "properties": {
           "zone": {
@@ -604,6 +857,52 @@
         "type": "object",
         "title": "HierarchyPath",
         "description": "Full path from zone down to DT for a meter, as shown in the breadcrumb."
+      },
+      "HierarchySubtreeResponse": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/HierarchyNode"
+            },
+            "type": "array",
+            "title": "Data",
+            "description": "Subtree of descendants evaluated via recursive CTE with depth guard."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta",
+            "description": "Cache freshness and origin metadata."
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "HierarchySubtreeResponse",
+        "description": "Response payload for GET /v1/nodes/{id}/subtree."
+      },
+      "HierarchyTreeResponse": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/TreeNode"
+            },
+            "type": "array",
+            "title": "Data",
+            "description": "Reconstructed 7-level network tree with deterministic repairs."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta",
+            "description": "Cache freshness and origin metadata."
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "HierarchyTreeResponse",
+        "description": "Response payload for GET /v1/hierarchy."
       },
       "InstallationStatus": {
         "type": "string",
@@ -781,6 +1080,47 @@
         "title": "MeterListResponse",
         "description": "Response payload for GET /v1/meters."
       },
+      "MeterNearbyItem": {
+        "properties": {
+          "meter": {
+            "$ref": "#/components/schemas/Meter"
+          },
+          "distance_km": {
+            "type": "number",
+            "title": "Distance Km"
+          }
+        },
+        "type": "object",
+        "required": [
+          "meter",
+          "distance_km"
+        ],
+        "title": "MeterNearbyItem",
+        "description": "A meter and its calculated great-circle distance from a query coordinate."
+      },
+      "MetersNearbyResponse": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/MeterNearbyItem"
+            },
+            "type": "array",
+            "title": "Data",
+            "description": "Meters within query radius sorted by great-circle distance."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta",
+            "description": "Cache freshness and origin metadata."
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "MetersNearbyResponse",
+        "description": "Response payload for GET /v1/meters/nearby."
+      },
       "PhaseType": {
         "type": "string",
         "enum": [
@@ -789,6 +1129,67 @@
         ],
         "title": "PhaseType",
         "description": "Phase types observed on the portal."
+      },
+      "QualityReport": {
+        "properties": {
+          "total_meters_audited": {
+            "type": "integer",
+            "title": "Total Meters Audited"
+          },
+          "total_nodes_audited": {
+            "type": "integer",
+            "title": "Total Nodes Audited"
+          },
+          "hierarchy_defects": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Hierarchy Defects"
+          },
+          "meter_defects": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Meter Defects"
+          },
+          "consumption_defects": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Consumption Defects"
+          },
+          "quality_score": {
+            "type": "number",
+            "title": "Quality Score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total_meters_audited",
+          "total_nodes_audited",
+          "hierarchy_defects",
+          "meter_defects",
+          "consumption_defects",
+          "quality_score"
+        ],
+        "title": "QualityReport",
+        "description": "Defect report aggregating data quality issues across the utility network."
+      },
+      "QualityResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/QualityReport",
+            "description": "Aggregated quality defects across hierarchy, meters, and readings."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta",
+            "description": "Cache freshness and origin metadata."
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "QualityResponse",
+        "description": "Response payload for GET /v1/quality."
       },
       "Reading": {
         "properties": {
@@ -950,6 +1351,61 @@
         ],
         "title": "SyncStatus",
         "description": "Status lifecycle of a sync run."
+      },
+      "TreeNode": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "level": {
+            "$ref": "#/components/schemas/HierarchyLevel"
+          },
+          "parent_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Code"
+          },
+          "quality_flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Quality Flags"
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/TreeNode"
+            },
+            "type": "array",
+            "title": "Children"
+          },
+          "meter_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Meter Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "name",
+          "level"
+        ],
+        "title": "TreeNode",
+        "description": "Recursive node in the reconstructed network tree."
       },
       "ValidationError": {
         "properties": {

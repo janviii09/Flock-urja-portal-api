@@ -8,8 +8,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from urja.api.errors import (
     MeterNotFoundError,
+    NodeNotFoundError,
     http_exception_handler,
     meter_not_found_handler,
+    node_not_found_handler,
     portal_upstream_error_handler,
     unhandled_exception_handler,
     validation_exception_handler,
@@ -44,6 +46,7 @@ app = FastAPI(
 
 # ── Register RFC 7807 Error Handlers ──────────────────────────────────
 app.add_exception_handler(MeterNotFoundError, meter_not_found_handler)
+app.add_exception_handler(NodeNotFoundError, node_not_found_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 app.add_exception_handler(PortalUnavailableError, portal_upstream_error_handler)

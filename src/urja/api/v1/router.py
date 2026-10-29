@@ -14,17 +14,23 @@ from urja.api.deps import (
     get_store,
     get_sync_engine,
 )
-from urja.api.errors import MeterNotFoundError
+from urja.api.errors import MeterNotFoundError, NodeNotFoundError
 from urja.api.v1.schemas import (
     ConsumptionResponse,
     CursorPagination,
     HealthResponse,
+    HierarchyNodeListResponse,
+    HierarchySubtreeResponse,
+    HierarchyTreeResponse,
     MeterDetailResponse,
     MeterListResponse,
+    MetersNearbyResponse,
+    QualityResponse,
 )
 from urja.client.portal import PortalClient
-from urja.domain.models import InstallationStatus, PhaseType
+from urja.domain.models import InstallationStatus, MeterNearbyItem, PhaseType
 from urja.freshness.manager import FreshnessManager, ResourceType, ResponseMeta
+from urja.hierarchy.tree import HierarchyGraph, audit_network_quality
 from urja.store.repository import Store
 from urja.sync.engine import SyncEngine
 
@@ -147,6 +153,67 @@ async def list_meters(
         ),
         meta=meta,
     )
+
+
+@router.get(
+    "/meters/nearby",
+    response_model=MetersNearbyResponse,
+    summary="Spatial meter query with bounding-box prefilter and haversine distance",
+    description=(
+        "Finds smart meters within radius_km of a GPS coordinate using two-phase querying: "
+        "bounding-box bounding filter in SQL followed by exact great-circle haversine calculation. "
+        "Excludes Null Island (0,0) and records with missing coordinates."
+    ),
+)
+async def get_meters_nearby(
+    lat: Annotated[
+        float,
+        Query(
+            ge=-90.0,
+            le=90.0,
+            description="Latitude in decimal degrees (-90 to 90).",
+            examples=[28.6139],
+        ),
+    ],
+    lon: Annotated[
+        float,
+        Query(
+            ge=-180.0,
+            le=180.0,
+            description="Longitude in decimal degrees (-180 to 180).",
+            examples=[77.2090],
+        ),
+    ],
+    radius_km: Annotated[
+        float,
+        Query(
+            gt=0.0,
+            le=500.0,
+            description="Search radius in kilometers (default 5.0 km, max 500 km).",
+            examples=[5.0],
+        ),
+    ] = 5.0,
+    limit: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=100,
+            description="Maximum number of nearby meters to return (default 20, max 100).",
+            examples=[20],
+        ),
+    ] = 20,
+    store: Annotated[Store, Depends(get_store)] = None,
+    freshness: Annotated[FreshnessManager, Depends(get_freshness)] = None,
+) -> MetersNearbyResponse:
+    results = store.find_meters_nearby(lat=lat, lon=lon, radius_km=radius_km, limit=limit)
+    items = [MeterNearbyItem(meter=m, distance_km=d) for m, d in results]
+
+    meta = freshness.evaluate(
+        fetched_at=datetime.now(timezone.utc),
+        resource_type=ResourceType.METER_LIST,
+        source="store",
+    )
+    return MetersNearbyResponse(data=items, meta=meta)
 
 
 @router.get(
@@ -356,3 +423,111 @@ async def health(
         last_sync=last_sync,
         meta=meta,
     )
+
+
+# ── Network Hierarchy & Quality Endpoints ─────────────────────────────
+
+
+@router.get(
+    "/hierarchy",
+    response_model=HierarchyTreeResponse,
+    summary="Reconstructed 7-level network tree",
+    description=(
+        "Synthesizes the complete utility network hierarchy tree (Zone › Circle › "
+        "Division › Subdivision › Substation › Feeder › DT) with deterministic repair rules: "
+        "ID normalization, multiple parent tie-breaking, cycle breaking, and dangling ref detachment. "
+        "No nodes are ever deleted."
+    ),
+)
+async def get_hierarchy(
+    store: Annotated[Store, Depends(get_store)],
+    freshness: Annotated[FreshnessManager, Depends(get_freshness)],
+) -> HierarchyTreeResponse:
+    nodes = store.list_all_nodes()
+    meters = store.list_all_meters()
+    graph = HierarchyGraph(nodes, meters)
+    tree, _ = graph.analyze_and_build()
+
+    meta = freshness.evaluate(
+        fetched_at=datetime.now(timezone.utc),
+        resource_type=ResourceType.TRANSFORMERS,
+        source="store",
+    )
+    return HierarchyTreeResponse(data=tree, meta=meta)
+
+
+@router.get(
+    "/nodes/{node_id}/children",
+    response_model=HierarchyNodeListResponse,
+    summary="Direct children of a hierarchy node",
+    description="Returns the immediate children of the specified hierarchy node code.",
+)
+async def get_node_children(
+    node_id: str,
+    store: Annotated[Store, Depends(get_store)],
+    freshness: Annotated[FreshnessManager, Depends(get_freshness)],
+) -> HierarchyNodeListResponse:
+    node = store.get_hierarchy_node(node_id)
+    if not node:
+        raise NodeNotFoundError(node_id)
+
+    children = store.get_node_children(node_id)
+    meta = freshness.evaluate(
+        fetched_at=datetime.now(timezone.utc),
+        resource_type=ResourceType.TRANSFORMERS,
+        source="store",
+    )
+    return HierarchyNodeListResponse(data=children, meta=meta)
+
+
+@router.get(
+    "/nodes/{node_id}/subtree",
+    response_model=HierarchySubtreeResponse,
+    summary="Subtree query using recursive CTE",
+    description=(
+        "Fetches all descendants of the specified hierarchy node using a recursive "
+        "Common Table Expression (CTE) with depth guard."
+    ),
+)
+async def get_node_subtree(
+    node_id: str,
+    store: Annotated[Store, Depends(get_store)],
+    freshness: Annotated[FreshnessManager, Depends(get_freshness)],
+) -> HierarchySubtreeResponse:
+    node = store.get_hierarchy_node(node_id)
+    if not node:
+        raise NodeNotFoundError(node_id)
+
+    subtree_nodes = store.get_node_subtree_cte(node_id)
+    meta = freshness.evaluate(
+        fetched_at=datetime.now(timezone.utc),
+        resource_type=ResourceType.TRANSFORMERS,
+        source="store",
+    )
+    return HierarchySubtreeResponse(data=subtree_nodes, meta=meta)
+
+
+@router.get(
+    "/quality",
+    response_model=QualityResponse,
+    summary="Network data quality defect report",
+    description=(
+        "Audits the network for data anomalies across hierarchy (orphans, cycles, "
+        "multiple parents, dangling references, ID mismatches), meters (null island, "
+        "missing nameplates), and consumption readings (monotonicity violations)."
+    ),
+)
+async def get_quality(
+    store: Annotated[Store, Depends(get_store)],
+    freshness: Annotated[FreshnessManager, Depends(get_freshness)],
+) -> QualityResponse:
+    nodes = store.list_all_nodes()
+    meters = store.list_all_meters()
+    report = audit_network_quality(nodes, meters)
+
+    meta = freshness.evaluate(
+        fetched_at=datetime.now(timezone.utc),
+        resource_type=ResourceType.TRANSFORMERS,
+        source="store",
+    )
+    return QualityResponse(data=report, meta=meta)

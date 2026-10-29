@@ -47,6 +47,14 @@ class MeterNotFoundError(Exception):
         super().__init__(f"Meter '{meter_id}' not found.")
 
 
+class NodeNotFoundError(Exception):
+    """Raised when a hierarchy node code is not found."""
+
+    def __init__(self, node_id: str) -> None:
+        self.node_id = node_id
+        super().__init__(f"Hierarchy node '{node_id}' not found.")
+
+
 def create_problem_response(
     status: int,
     title: str,
@@ -77,6 +85,16 @@ async def meter_not_found_handler(request: Request, exc: MeterNotFoundError) -> 
         title="Meter Not Found",
         detail=f"Meter with ID '{exc.meter_id}' was not found.",
         error_type="meter-not-found",
+        instance=request.url.path,
+    )
+
+
+async def node_not_found_handler(request: Request, exc: NodeNotFoundError) -> JSONResponse:
+    return create_problem_response(
+        status=404,
+        title="Node Not Found",
+        detail=f"Hierarchy node with code '{exc.node_id}' was not found.",
+        error_type="node-not-found",
         instance=request.url.path,
     )
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -299,6 +300,76 @@ class Store:
             cursor = self._conn.cursor()
             cursor.execute(query, params)
             return int(cursor.fetchone()[0])
+
+    def list_all_meters(self) -> list[Meter]:
+        """Fetch all meters in the store."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT * FROM meters ORDER BY meter_id ASC")
+            return [self._row_to_meter(r) for r in cursor.fetchall()]
+
+    def find_meters_nearby(
+        self,
+        lat: float,
+        lon: float,
+        radius_km: float = 5.0,
+        limit: int = 20,
+    ) -> list[tuple[Meter, float]]:
+        """Find meters within radius_km using bounding-box prefilter + haversine distance.
+
+        Excludes Null Island (0,0) and records with missing coordinates.
+        Returns list of (Meter, distance_km) sorted by distance ascending.
+        """
+        # 1. Bounding box prefilter
+        lat_delta = radius_km / 111.32
+        cos_lat = math.cos(math.radians(lat))
+        lon_delta = radius_km / (111.32 * max(0.01, abs(cos_lat)))
+
+        min_lat = lat - lat_delta
+        max_lat = lat + lat_delta
+        min_lon = lon - lon_delta
+        max_lon = lon + lon_delta
+
+        query = """
+        SELECT * FROM meters
+        WHERE latitude BETWEEN ? AND ?
+          AND longitude BETWEEN ? AND ?
+          AND NOT (latitude = 0.0 AND longitude = 0.0)
+        """
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(query, (min_lat, max_lat, min_lon, max_lon))
+            rows = cursor.fetchall()
+
+        # 2. Haversine distance calculation
+        r_earth = 6371.0
+        results: list[tuple[Meter, float]] = []
+
+        for row in rows:
+            m = self._row_to_meter(row)
+            if not m.location:
+                continue
+
+            m_lat = m.location.latitude
+            m_lon = m.location.longitude
+
+            dlat = math.radians(m_lat - lat)
+            dlon = math.radians(m_lon - lon)
+            a = (
+                math.sin(dlat / 2.0) ** 2
+                + math.cos(math.radians(lat))
+                * math.cos(math.radians(m_lat))
+                * math.sin(dlon / 2.0) ** 2
+            )
+            c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+            dist_km = r_earth * c
+
+            if dist_km <= radius_km:
+                results.append((m, round(dist_km, 3)))
+
+        # Sort by distance ascending and slice limit
+        results.sort(key=lambda item: item[1])
+        return results[:limit]
 
     def _row_to_meter(self, row: sqlite3.Row) -> Meter:
         """Deserialize database row to Meter domain model."""
@@ -630,6 +701,50 @@ class Store:
         with self._lock:
             cursor = self._conn.cursor()
             cursor.execute(query, params)
+            return [self._row_to_node(r) for r in cursor.fetchall()]
+
+    def list_all_nodes(self) -> list[HierarchyNode]:
+        """Fetch all hierarchy nodes in the store."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT * FROM hierarchy_nodes ORDER BY code ASC")
+            return [self._row_to_node(r) for r in cursor.fetchall()]
+
+    def get_node_children(self, parent_code: str) -> list[HierarchyNode]:
+        """Fetch immediate direct children of a hierarchy node."""
+        norm = parent_code.strip().upper()
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT * FROM hierarchy_nodes WHERE UPPER(TRIM(parent_code)) = ? ORDER BY code ASC",
+                (norm,),
+            )
+            return [self._row_to_node(r) for r in cursor.fetchall()]
+
+    def get_node_subtree_cte(self, root_code: str) -> list[HierarchyNode]:
+        """Fetch all descendants of a node using an iterative recursive CTE with cycle protection.
+
+        Includes the root node itself as the first element if found.
+        """
+        norm = root_code.strip().upper()
+        query = """
+        WITH RECURSIVE subtree(code, name, level, parent_code, quality_flags, depth) AS (
+            SELECT code, name, level, parent_code, quality_flags, 0 AS depth
+            FROM hierarchy_nodes
+            WHERE UPPER(TRIM(code)) = ?
+            UNION ALL
+            SELECT h.code, h.name, h.level, h.parent_code, h.quality_flags, s.depth + 1
+            FROM hierarchy_nodes h
+            JOIN subtree s ON UPPER(TRIM(h.parent_code)) = UPPER(TRIM(s.code))
+            WHERE s.depth < 20
+        )
+        SELECT code, name, level, parent_code, quality_flags
+        FROM subtree
+        ORDER BY depth ASC, code ASC;
+        """
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(query, (norm,))
             return [self._row_to_node(r) for r in cursor.fetchall()]
 
     def _row_to_node(self, row: sqlite3.Row) -> HierarchyNode:

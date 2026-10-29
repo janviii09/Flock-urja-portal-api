@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from urja.domain.models import Meter, Reading, SyncRun
+from urja.domain.models import (
+    HierarchyNode,
+    Meter,
+    MeterNearbyItem,
+    QualityReport,
+    Reading,
+    SyncRun,
+    TreeNode,
+)
 from urja.freshness.manager import ResponseMeta
 
 
@@ -55,3 +63,48 @@ class HealthResponse(BaseModel):
         None, description="Details of the most recent synchronization job."
     )
     meta: ResponseMeta = Field(..., description="Freshness metadata for the health evaluation.")
+
+
+class HierarchyTreeResponse(BaseModel):
+    """Response payload for GET /v1/hierarchy."""
+
+    data: list[TreeNode] = Field(
+        ..., description="Reconstructed 7-level network tree with deterministic repairs."
+    )
+    meta: ResponseMeta = Field(..., description="Cache freshness and origin metadata.")
+
+
+class HierarchyNodeListResponse(BaseModel):
+    """Response payload for GET /v1/nodes/{id}/children."""
+
+    data: list[HierarchyNode] = Field(
+        ..., description="Direct child nodes of the requested hierarchy node."
+    )
+    meta: ResponseMeta = Field(..., description="Cache freshness and origin metadata.")
+
+
+class HierarchySubtreeResponse(BaseModel):
+    """Response payload for GET /v1/nodes/{id}/subtree."""
+
+    data: list[HierarchyNode] = Field(
+        ..., description="Subtree of descendants evaluated via recursive CTE with depth guard."
+    )
+    meta: ResponseMeta = Field(..., description="Cache freshness and origin metadata.")
+
+
+class QualityResponse(BaseModel):
+    """Response payload for GET /v1/quality."""
+
+    data: QualityReport = Field(
+        ..., description="Aggregated quality defects across hierarchy, meters, and readings."
+    )
+    meta: ResponseMeta = Field(..., description="Cache freshness and origin metadata.")
+
+
+class MetersNearbyResponse(BaseModel):
+    """Response payload for GET /v1/meters/nearby."""
+
+    data: list[MeterNearbyItem] = Field(
+        ..., description="Meters within query radius sorted by great-circle distance."
+    )
+    meta: ResponseMeta = Field(..., description="Cache freshness and origin metadata.")
